@@ -1,16 +1,269 @@
 import express from 'express';
 import cors from 'cors';
-import { PrismaClient } from '@prisma/client';
 import type { Response, Request } from 'express';
+import axios from 'axios';
+import { prisma } from './prisma.js';
+import { formatInTimeZone } from 'date-fns-tz';
+import { Decimal } from '@prisma/client/runtime/library';
 
-const prisma = new PrismaClient();
+const TIMEZONE = 'Australia/Sydney';
 const app = express();
 
-app.use(cors());
+// CORS configuration
+app.use(cors({
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 
-// Store connected clients
-const clients = new Set<Response>();
+// Store connected clients for different event types
+const clients = {
+  transactions: new Set<Response>(),
+  stats: new Set<Response>()
+};
+
+// Helper function to convert UTC to Australian time
+function toAustralianTime(date: string | Date): Date {
+  // API returns UTC time, so we need to convert it to Australian time
+  const utcDate = new Date(date);
+  // Add timezone offset for Sydney (typically UTC+10 or UTC+11)
+  return new Date(utcDate.getTime() + (10 * 60 * 60 * 1000)); // Adding 10 hours for Sydney
+}
+
+// Helper function to format time to Australian timezone string
+function formatAustralianTime(date: Date): string {
+  // Add timezone offset for Sydney
+  const sydneyDate = new Date(date.getTime() + (10 * 60 * 60 * 1000));
+  return formatInTimeZone(sydneyDate, TIMEZONE, 'MMM d, yyyy, HH:mm:ss');
+}
+
+// Function to fetch and store Blockchair stats
+async function fetchAndStoreBlockchairStats() {
+  try {
+    // Fetch Bitcoin stats
+    const bitcoinResponse = await axios.get('https://api.blockchair.com/bitcoin/stats');
+    const bitcoinStats = bitcoinResponse.data;
+    
+    await prisma.blockchairStats.create({
+      data: {
+        timestamp: formatAustralianTime(new Date()),
+        network: 'bitcoin',
+        data: bitcoinStats
+      }
+    });
+
+    // Fetch Ethereum stats
+    const ethereumResponse = await axios.get('https://api.blockchair.com/ethereum/stats');
+    const ethereumStats = ethereumResponse.data;
+    
+    await prisma.blockchairStats.create({
+      data: {
+        timestamp: formatAustralianTime(new Date()),
+        network: 'ethereum',
+        data: ethereumStats
+      }
+    });
+
+    // Broadcast update to connected clients with the correct data structure
+    const updateData = {
+      type: 'stats_update',
+      bitcoin: { data: bitcoinStats.data },
+      ethereum: { data: ethereumStats.data },
+      timestamp: formatAustralianTime(new Date())
+    };
+
+    console.log('Broadcasting stats update:', JSON.stringify(updateData, null, 2));
+    broadcastUpdate(updateData);
+
+  } catch (error) {
+    console.error('Error fetching Blockchair stats:', error);
+  }
+}
+
+fetchAndStoreBlockchairStats();
+
+// Update interval to 60 seconds for stats
+setInterval(fetchAndStoreBlockchairStats, 60 * 1000);
+
+// Function to fetch and store transaction data
+async function fetchAndStoreTransactions() {
+  try {
+    // Calculate time range in UTC
+    const now = Math.floor(Date.now() / 1000);
+    const tenMinutesAgo = now - 600; // 10 minutes in seconds
+
+    // Format the date in YYYY-MM-DD HH:MM:SS format
+    const date = new Date(tenMinutesAgo * 1000);
+    const timeStr = date.toISOString()
+      .replace('T', ' ')
+      .split('.')[0];
+
+    // Construct the query with time range from 10 minutes ago to now
+    const query = `time(${timeStr}..${new Date(now * 1000).toISOString().replace('T', ' ').split('.')[0]})`;
+
+    // Fetch Bitcoin transactions
+    const bitcoinResponse = await axios.get('https://api.blockchair.com/bitcoin/transactions', {
+      params: {
+        q: query,
+        limit: 100,
+        s: 'time(desc)'
+      }
+    });
+
+    // Store Bitcoin transactions
+    if (bitcoinResponse.data.data && Array.isArray(bitcoinResponse.data.data)) {
+      for (const tx of bitcoinResponse.data.data) {
+        try {
+          await prisma.bitcoinTransaction.upsert({
+            where: { hash: tx.hash },
+            update: {
+              blockNumber: BigInt(tx.block_id),
+              timestamp: toAustralianTime(tx.time),
+              value: tx.output_total.toString(),
+              fee: tx.fee.toString(),
+              fromAddress: tx.input_count > 1 ? `${tx.input_count} Inputs` : tx.inputs?.[0]?.recipient || 'Unknown',
+              toAddress: tx.output_count > 1 ? `${tx.output_count} Outputs` : tx.outputs?.[0]?.recipient || 'Unknown'
+            },
+            create: {
+              hash: tx.hash,
+              blockNumber: BigInt(tx.block_id),
+              timestamp: toAustralianTime(tx.time),
+              value: tx.output_total.toString(),
+              fee: tx.fee.toString(),
+              fromAddress: tx.input_count > 1 ? `${tx.input_count} Inputs` : tx.inputs?.[0]?.recipient || 'Unknown',
+              toAddress: tx.output_count > 1 ? `${tx.output_count} Outputs` : tx.outputs?.[0]?.recipient || 'Unknown'
+            }
+          });
+        } catch (err) {
+          console.error('Error storing Bitcoin transaction:', err);
+        }
+      }
+    }
+
+    // Fetch Ethereum transactions with the same query
+    const ethereumResponse = await axios.get('https://api.blockchair.com/ethereum/transactions', {
+      params: {
+        q: query,
+        limit: 100,
+        s: 'time(desc)'
+      }
+    });
+
+    // Store Ethereum transactions
+    if (ethereumResponse.data.data && Array.isArray(ethereumResponse.data.data)) {
+      for (const tx of ethereumResponse.data.data) {
+        try {
+          // Skip synthetic transactions and transactions without hash
+          if (!tx.hash || tx.type === 'synthetic_coinbase') {
+            console.log(`Skipping Ethereum transaction: ${tx.type || 'missing hash'}`);
+            continue;
+          }
+
+          // Convert Wei to Ether (divide by 1e18) for value
+          const valueInEther = (BigInt(tx.value || 0) / BigInt(1e18)).toString();
+          
+          // Calculate gas fee in Ether
+          const gasUsed = BigInt(tx.gas_used || 0);
+          const gasPrice = BigInt(tx.gas_price || 0);
+          const gasFeeInWei = gasUsed * gasPrice;
+          const gasFeeInEther = (gasFeeInWei / BigInt(1e18)).toString();
+
+          await prisma.ethereumTransaction.upsert({
+            where: { hash: tx.hash },
+            update: {
+              blockNumber: BigInt(tx.block_id || 0),
+              timestamp: toAustralianTime(tx.time),
+              value: valueInEther,
+              gasFee: gasFeeInEther,
+              gasPrice: tx.gas_price?.toString() || '0',
+              gasUsed: gasUsed,
+              fromAddress: tx.sender || 'Unknown',
+              toAddress: tx.recipient || 'Unknown'
+            },
+            create: {
+              hash: tx.hash,
+              blockNumber: BigInt(tx.block_id || 0),
+              timestamp: toAustralianTime(tx.time),
+              value: valueInEther,
+              gasFee: gasFeeInEther,
+              gasPrice: tx.gas_price?.toString() || '0',
+              gasUsed: gasUsed,
+              fromAddress: tx.sender || 'Unknown',
+              toAddress: tx.recipient || 'Unknown'
+            }
+          });
+        } catch (err) {
+          console.error('Error storing Ethereum transaction:', err);
+        }
+      }
+    }
+
+    // Broadcast update to connected clients
+    broadcastUpdate({
+      type: 'transactions_update',
+      bitcoin: bitcoinResponse.data.data || [],
+      ethereum: ethereumResponse.data.data || [],
+      timestamp: formatAustralianTime(new Date())
+    });
+
+  } catch (error) {
+    console.error('Error fetching transactions:', error);
+  }
+}
+
+// Initial fetch
+fetchAndStoreTransactions();
+
+// Fetch transactions every minute
+setInterval(fetchAndStoreTransactions, 60 * 1000);
+
+// Endpoint to get latest stats
+app.get('/api/stats/latest', async (req: Request, res: Response) => {
+  try {
+    const [bitcoinStats, ethereumStats] = await Promise.all([
+      prisma.blockchairStats.findFirst({
+        where: { network: 'bitcoin' },
+        orderBy: { timestamp: 'desc' }
+      }),
+      prisma.blockchairStats.findFirst({
+        where: { network: 'ethereum' },
+        orderBy: { timestamp: 'desc' }
+      })
+    ]);
+
+    res.json({
+      bitcoin: bitcoinStats?.data || null,
+      ethereum: ethereumStats?.data || null
+    });
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// SSE endpoint for real-time stats updates
+app.get('/api/stats/stream', (req: Request, res: Response) => {
+  // Set headers for SSE
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+
+  // Send initial message
+  res.write('data: {"type": "connected"}\n\n');
+
+  // Add client to the stats set
+  clients.stats.add(res);
+
+  // Remove client when connection is closed
+  req.on('close', () => {
+    clients.stats.delete(res);
+  });
+});
 
 // SSE endpoint for real-time transaction updates
 app.get('/api/transactions/stream', (req: Request, res: Response) => {
@@ -24,44 +277,177 @@ app.get('/api/transactions/stream', (req: Request, res: Response) => {
   // Send initial message
   res.write('data: {"type": "connected"}\n\n');
 
-  // Add client to the set
-  clients.add(res);
+  // Add client to the transactions set
+  clients.transactions.add(res);
 
   // Remove client when connection is closed
   req.on('close', () => {
-    clients.delete(res);
+    clients.transactions.delete(res);
   });
 });
 
-// Helper function to broadcast updates to all connected clients
+// Update broadcastUpdate function to handle different event types
 const broadcastUpdate = (data: any) => {
-  clients.forEach(client => {
-    client.write(`data: ${JSON.stringify(data)}\n\n`);
+  const clientSet = data.type === 'stats_update' ? clients.stats : clients.transactions;
+  
+  console.log(`Broadcasting to ${clientSet.size} clients for type: ${data.type}`);
+  
+  // Ensure data structure matches frontend expectations
+  const serializedData = {
+    ...data,
+    bitcoin: data.type === 'stats_update' 
+      ? { data: data.bitcoin.data }
+      : Array.isArray(data.bitcoin) 
+        ? data.bitcoin.map((tx: any) => ({
+            ...tx,
+            blockNumber: tx.block_id?.toString(),
+            value: tx.output_total?.toString(),
+            fee: tx.fee?.toString()
+          }))
+        : data.bitcoin,
+    ethereum: data.type === 'stats_update'
+      ? { data: data.ethereum.data }
+      : Array.isArray(data.ethereum)
+        ? data.ethereum.map((tx: any) => ({
+            ...tx,
+            blockNumber: tx.block_id?.toString(),
+            value: tx.value?.toString(),
+            gasPrice: tx.gas_price?.toString(),
+            gasUsed: tx.gas_limit?.toString(),
+            gasFee: tx.gas_price && tx.gas_limit 
+              ? (BigInt(tx.gas_price) * BigInt(tx.gas_limit)).toString()
+              : '0'
+          }))
+        : data.ethereum
+  };
+
+  clientSet.forEach(client => {
+    try {
+      client.write(`data: ${JSON.stringify(serializedData)}\n\n`);
+    } catch (error) {
+      console.error('Error sending SSE update:', error);
+      clients.stats.delete(client);
+    }
   });
 };
 
-// Example endpoint to get latest transactions
+// Define transaction types
+interface BaseTransaction {
+  id: number;
+  hash: string;
+  blockNumber: string;
+  timestamp: Date;
+  value: Decimal;
+  fromAddress: string;
+  toAddress: string;
+  createdAt: Date;
+  network: 'bitcoin' | 'ethereum';
+}
+
+interface BitcoinTransaction extends BaseTransaction {
+  network: 'bitcoin';
+  fee: Decimal;
+}
+
+interface EthereumTransaction extends BaseTransaction {
+  network: 'ethereum';
+  gasFee: Decimal;
+  gasPrice: Decimal;
+  gasUsed: string;
+}
+
+type Transaction = BitcoinTransaction | EthereumTransaction;
+
+// Update transactions endpoint to support pagination and sorting
 app.get('/api/transactions/latest', async (req: Request, res: Response) => {
   try {
-    const [bitcoinTx, ethereumTx] = await Promise.all([
-      prisma.bitcoinTransaction.findMany({
-        take: 10,
-        orderBy: { timestamp: 'desc' },
-      }),
-      prisma.ethereumTransaction.findMany({
-        take: 10,
-        orderBy: { timestamp: 'desc' },
-      }),
-    ]);
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 10;
+    const sortBy = (req.query.sortBy as string) || 'timestamp';
+    const sortOrder = (req.query.sortOrder as string) === 'asc' ? 'asc' : 'desc';
+    const network = (req.query.network as string) || 'all';
 
-    res.json({ bitcoin: bitcoinTx, ethereum: ethereumTx });
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    let transactions: Transaction[] = [];
+
+    // Fetch transactions based on network
+    if (network === 'all' || network === 'bitcoin') {
+      const bitcoinTx = await prisma.bitcoinTransaction.findMany({
+        where: {
+          timestamp: {
+            gte: tenMinutesAgo
+          }
+        },
+        orderBy: {
+          [sortBy]: sortOrder
+        },
+        take: 100  // Always fetch up to 100 transactions
+      });
+      
+      transactions.push(...bitcoinTx.map(tx => ({
+        ...tx,
+        blockNumber: tx.blockNumber.toString(),
+        network: 'bitcoin' as const
+      })));
+    }
+
+    if (network === 'all' || network === 'ethereum') {
+      const ethereumTx = await prisma.ethereumTransaction.findMany({
+        where: {
+          timestamp: {
+            gte: tenMinutesAgo
+          }
+        },
+        orderBy: {
+          [sortBy]: sortOrder
+        },
+        take: 100  // Always fetch up to 100 transactions
+      });
+
+      transactions.push(...ethereumTx.map(tx => ({
+        ...tx,
+        blockNumber: tx.blockNumber.toString(),
+        gasUsed: tx.gasUsed.toString(),
+        network: 'ethereum' as const
+      })));
+    }
+
+    // Sort combined transactions if needed
+    if (network === 'all') {
+      transactions.sort((a, b) => {
+        if (sortBy === 'timestamp') {
+          return sortOrder === 'desc' 
+            ? b.timestamp.getTime() - a.timestamp.getTime()
+            : a.timestamp.getTime() - b.timestamp.getTime();
+        }
+        return sortOrder === 'desc'
+          ? String(b[sortBy as keyof Transaction]).localeCompare(String(a[sortBy as keyof Transaction]))
+          : String(a[sortBy as keyof Transaction]).localeCompare(String(b[sortBy as keyof Transaction]));
+      });
+    }
+
+    // Calculate total and apply pagination
+    const total = Math.min(transactions.length, 100);
+    const startIndex = (page - 1) * limit;
+    const endIndex = Math.min(startIndex + limit, total);
+    const paginatedTransactions = transactions.slice(startIndex, endIndex);
+
+    res.json({
+      transactions: paginatedTransactions,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
     console.error('Error fetching transactions:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);

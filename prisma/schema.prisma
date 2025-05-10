@@ -18,8 +18,8 @@ model BitcoinTransaction {
   hash        String   @unique
   blockNumber BigInt
   timestamp   DateTime
-  value       Decimal  @db.Decimal(18, 8)
-  fee         Decimal  @db.Decimal(18, 8)
+  value       Decimal  @db.Decimal(36, 8)
+  fee         Decimal  @db.Decimal(36, 8)
   fromAddress String
   toAddress   String
   createdAt   DateTime @default(now())
@@ -49,4 +49,17 @@ model EthereumTransaction {
   @@index([timestamp])
   @@index([fromAddress])
   @@index([toAddress])
+}
+
+model blockchairStats {
+  id        Int      @id @default(autoincrement())
+  timestamp String
+  network   String
+  data      Json
+  createdAt DateTime @default(now())
+
+  @@map("blockchair_stats")
+  @@index([timestamp])
+  @@index([network])
+  @@unique([timestamp, network])
 }
