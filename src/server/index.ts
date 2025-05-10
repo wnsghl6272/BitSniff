@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
-import { PrismaClient } from '../generated/prisma';
+import { PrismaClient } from '@prisma/client';
+import type { Response, Request } from 'express';
 
 const prisma = new PrismaClient();
 const app = express();
@@ -9,10 +10,10 @@ app.use(cors());
 app.use(express.json());
 
 // Store connected clients
-const clients = new Set<express.Response>();
+const clients = new Set<Response>();
 
 // SSE endpoint for real-time transaction updates
-app.get('/api/transactions/stream', (req, res) => {
+app.get('/api/transactions/stream', (req: Request, res: Response) => {
   // Set headers for SSE
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -33,14 +34,14 @@ app.get('/api/transactions/stream', (req, res) => {
 });
 
 // Helper function to broadcast updates to all connected clients
-export const broadcastUpdate = (data: any) => {
+const broadcastUpdate = (data: any) => {
   clients.forEach(client => {
     client.write(`data: ${JSON.stringify(data)}\n\n`);
   });
 };
 
 // Example endpoint to get latest transactions
-app.get('/api/transactions/latest', async (req, res) => {
+app.get('/api/transactions/latest', async (req: Request, res: Response) => {
   try {
     const [bitcoinTx, ethereumTx] = await Promise.all([
       prisma.bitcoinTransaction.findMany({
@@ -64,4 +65,6 @@ const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
-}); 
+});
+
+export { broadcastUpdate }; 
