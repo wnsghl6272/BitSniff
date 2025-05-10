@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "bitcoin_transactions" ALTER COLUMN "value" SET DATA TYPE DECIMAL(36,8),
+ALTER COLUMN "fee" SET DATA TYPE DECIMAL(36,8);
