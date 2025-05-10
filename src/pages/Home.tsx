@@ -3,6 +3,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { Search } from "lucide-react"
 import { Input } from "../components/ui/input"
 import { Link } from "react-router-dom"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
+import { Bitcoin, Wallet } from "lucide-react"
 
 export default function Home() {
   return (
@@ -36,38 +38,82 @@ export default function Home() {
       <section className="py-12">
         <div className="container px-4 md:px-6">
           <h2 className="text-2xl font-bold tracking-tight mb-6">Latest Transactions</h2>
-          <div className="rounded-lg border bg-card">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Hash</TableHead>
-                  <TableHead>Block</TableHead>
-                  <TableHead>Time</TableHead>
-                  <TableHead>Value</TableHead>
-                  <TableHead>Fee</TableHead>
-                  <TableHead>From</TableHead>
-                  <TableHead>To</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {/* Placeholder data */}
-                <TableRow>
-                  <TableCell className="font-mono">
-                    <Link to="/tx/0x1234...5678" className="text-primary hover:underline">
-                      0x1234...5678
-                    </Link>
-                  </TableCell>
-                  <TableCell>16502394</TableCell>
-                  <TableCell>2 mins ago</TableCell>
-                  <TableCell>0.5 BTC</TableCell>
-                  <TableCell>0.0001 BTC</TableCell>
-                  <TableCell className="font-mono">bc1q...wxyz</TableCell>
-                  <TableCell className="font-mono">bc1q...abcd</TableCell>
-                </TableRow>
-                {/* Add more rows as needed */}
-              </TableBody>
-            </Table>
-          </div>
+          <Tabs defaultValue="bitcoin" className="w-full">
+            <TabsList className="mb-4">
+              <TabsTrigger value="bitcoin" className="flex items-center gap-2">
+                <Bitcoin className="h-4 w-4" />
+                Bitcoin
+              </TabsTrigger>
+              <TabsTrigger value="ethereum" className="flex items-center gap-2">
+                <Wallet className="h-4 w-4" />
+                Ethereum
+              </TabsTrigger>
+            </TabsList>
+            <TabsContent value="bitcoin">
+              <div className="rounded-lg border bg-card">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Hash</TableHead>
+                      <TableHead>Block</TableHead>
+                      <TableHead>Time</TableHead>
+                      <TableHead>Value</TableHead>
+                      <TableHead>Fee</TableHead>
+                      <TableHead>From</TableHead>
+                      <TableHead>To</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    <TableRow>
+                      <TableCell className="font-mono">
+                        <Link to="/tx/0x1234...5678" className="text-primary hover:underline">
+                          0x1234...5678
+                        </Link>
+                      </TableCell>
+                      <TableCell>16502394</TableCell>
+                      <TableCell>2 mins ago</TableCell>
+                      <TableCell>0.5 BTC</TableCell>
+                      <TableCell>0.0001 BTC</TableCell>
+                      <TableCell className="font-mono">bc1q...wxyz</TableCell>
+                      <TableCell className="font-mono">bc1q...abcd</TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              </div>
+            </TabsContent>
+            <TabsContent value="ethereum">
+              <div className="rounded-lg border bg-card">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Hash</TableHead>
+                      <TableHead>Block</TableHead>
+                      <TableHead>Time</TableHead>
+                      <TableHead>Value</TableHead>
+                      <TableHead>Gas Fee</TableHead>
+                      <TableHead>From</TableHead>
+                      <TableHead>To</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    <TableRow>
+                      <TableCell className="font-mono">
+                        <Link to="/tx/0xabcd...efgh" className="text-primary hover:underline">
+                          0xabcd...efgh
+                        </Link>
+                      </TableCell>
+                      <TableCell>18934521</TableCell>
+                      <TableCell>1 min ago</TableCell>
+                      <TableCell>1.2 ETH</TableCell>
+                      <TableCell>0.002 ETH</TableCell>
+                      <TableCell className="font-mono">0x123...789</TableCell>
+                      <TableCell className="font-mono">0x456...012</TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              </div>
+            </TabsContent>
+          </Tabs>
         </div>
       </section>
 
