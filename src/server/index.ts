@@ -1,13 +1,15 @@
-import express from 'express';
+import express, { Router } from 'express';
 import cors from 'cors';
-import type { Response, Request } from 'express';
+import type { Response, Request, RequestHandler } from 'express';
 import axios from 'axios';
-import { prisma } from './prisma.js';
+import { PrismaClient } from '@prisma/client';
 import { formatInTimeZone } from 'date-fns-tz';
 import { Decimal } from '@prisma/client/runtime/library';
 
 const TIMEZONE = 'Australia/Sydney';
 const app = express();
+const router = Router();
+const prisma = new PrismaClient();
 
 // CORS configuration
 app.use(cors({
@@ -381,7 +383,7 @@ app.get('/api/transactions/latest', async (req: Request, res: Response) => {
         orderBy: {
           [sortBy]: sortOrder
         },
-        take: 100  // Always fetch up to 100 transactions
+        take: network === 'all' ? 50 : 100  // Limit to 50 for combined view
       });
       
       transactions.push(...bitcoinTx.map(tx => ({
@@ -401,7 +403,7 @@ app.get('/api/transactions/latest', async (req: Request, res: Response) => {
         orderBy: {
           [sortBy]: sortOrder
         },
-        take: 100  // Always fetch up to 100 transactions
+        take: network === 'all' ? 50 : 100  // Limit to 50 for combined view
       });
 
       transactions.push(...ethereumTx.map(tx => ({
@@ -427,7 +429,7 @@ app.get('/api/transactions/latest', async (req: Request, res: Response) => {
     }
 
     // Calculate total and apply pagination
-    const total = Math.min(transactions.length, 100);
+    const total = network === 'all' ? Math.min(transactions.length, 100) : Math.min(transactions.length, 100);
     const startIndex = (page - 1) * limit;
     const endIndex = Math.min(startIndex + limit, total);
     const paginatedTransactions = transactions.slice(startIndex, endIndex);
@@ -446,6 +448,131 @@ app.get('/api/transactions/latest', async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// Wallet routes
+interface WalletParams {
+  network: string;
+  address: string;
+}
+
+const getWalletData = async (req: Request<WalletParams>, res: Response): Promise<void> => {
+  const { network, address } = req.params;
+  
+  try {
+    // Validate network parameter
+    if (network !== 'bitcoin' && network !== 'ethereum') {
+      res.status(400).json({ error: 'Invalid network. Must be "bitcoin" or "ethereum".' });
+      return;
+    }
+
+    // Validate address format
+    if (!address || address.length < 26 || address.length > 42) {
+      res.status(400).json({ error: 'Invalid address format' });
+      return;
+    }
+
+    // Try to get cached data first
+    const cachedWallet = await prisma.wallet.findFirst({
+      where: {
+        address,
+        network,
+        updatedAt: {
+          // Only use cache if it's less than 5 minutes old
+          gt: new Date(Date.now() - 5 * 60 * 1000)
+        }
+      }
+    });
+
+    if (cachedWallet) {
+      res.setHeader('Content-Type', 'application/json');
+      res.json(cachedWallet.data);
+      return;
+    }
+
+    // If not cached or cache expired, fetch from Blockchair
+    const apiResponse = await axios.get(`https://api.blockchair.com/${network}/dashboards/address/${address}`, {
+      params: network === 'ethereum' ? { erc_20: 'true', limit: 10 } : { limit: 10 },
+      headers: {
+        'Accept': 'application/json'
+      },
+      validateStatus: (status) => status === 200,
+      timeout: 10000 // 10 second timeout
+    });
+
+    // Validate API response
+    if (!apiResponse.data || typeof apiResponse.data !== 'object') {
+      throw new Error('Invalid API response format');
+    }
+
+    const addressData = apiResponse.data.data?.[address];
+    if (!addressData) {
+      res.status(404).json({ error: 'Address not found' });
+      return;
+    }
+
+    // Process and format the data
+    const formattedData = {
+      address,
+      network,
+      balance: addressData.address?.balance || '0',
+      totalTransactions: addressData.address?.transaction_count || 0,
+      lastSeen: addressData.address?.first_seen_receiving || null,
+      ...addressData
+    };
+
+    // Store in database
+    await prisma.wallet.upsert({
+      where: {
+        address_network: {
+          address,
+          network
+        }
+      },
+      update: {
+        data: formattedData,
+        updatedAt: new Date()
+      },
+      create: {
+        address,
+        network,
+        data: formattedData,
+        updatedAt: new Date()
+      }
+    });
+
+    res.setHeader('Content-Type', 'application/json');
+    res.json(formattedData);
+  } catch (error) {
+    console.error(`Error fetching ${network} wallet data:`, error);
+    
+    // Handle specific error cases
+    if (axios.isAxiosError(error)) {
+      if (error.response?.status === 404) {
+        res.status(404).json({ error: 'Address not found' });
+        return;
+      }
+      if (error.response?.status === 402) {
+        res.status(429).json({ error: 'API rate limit exceeded' });
+        return;
+      }
+      if (error.response?.status === 429) {
+        res.status(429).json({ error: 'Too many requests' });
+        return;
+      }
+      if (error.code === 'ECONNABORTED') {
+        res.status(504).json({ error: 'Request timeout' });
+        return;
+      }
+    }
+    
+    res.status(500).json({ 
+      error: 'Failed to fetch wallet data',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+};
+
+app.get('/api/wallet/:network/:address', getWalletData);
 
 const PORT = process.env.PORT || 5001;
 

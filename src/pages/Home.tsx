@@ -230,6 +230,16 @@ export default function Home() {
     return `${address.slice(0, 6)}...${address.slice(-4)}`;
   };
 
+  const AddressLink = ({ address, network }: { address: string, network: 'bitcoin' | 'ethereum' }) => (
+    <Link 
+      to={`/wallet/${address}`}
+      className="hover:underline text-primary font-mono"
+      title={address}
+    >
+      {shortenAddress(address)}
+    </Link>
+  );
+
   // 값 포맷팅 함수 (BTC/ETH)
   const formatValue = (value: string, currency: 'BTC' | 'ETH') => {
     return `${parseFloat(value).toFixed(6)} ${currency}`;
@@ -499,8 +509,12 @@ export default function Home() {
                       <TableCell>{tx.blockNumber}</TableCell>
                       <TableCell>{formatTime(tx.timestamp)}</TableCell>
                       <TableCell>{formatValue(tx.value, tx.network === 'bitcoin' ? 'BTC' : 'ETH')}</TableCell>
-                      <TableCell className="font-mono">{shortenAddress(tx.fromAddress)}</TableCell>
-                      <TableCell className="font-mono">{shortenAddress(tx.toAddress)}</TableCell>
+                      <TableCell className="font-mono">
+                        <AddressLink address={tx.fromAddress} network={tx.network} />
+                      </TableCell>
+                      <TableCell className="font-mono">
+                        <AddressLink address={tx.toAddress} network={tx.network} />
+                      </TableCell>
                       <TableCell>
                         {tx.network === 'bitcoin'
                           ? formatValue((tx as Transaction).fee, 'BTC')

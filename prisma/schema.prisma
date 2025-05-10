@@ -63,3 +63,15 @@ model blockchairStats {
   @@index([network])
   @@unique([timestamp, network])
 }
+
+model Wallet {
+  address   String
+  network   String
+  data      Json
+  updatedAt DateTime @updatedAt
+
+  @@id([address, network])
+  @@index([address])
+  @@index([network])
+  @@map("wallets")
+}
