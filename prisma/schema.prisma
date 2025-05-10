@@ -1,0 +1,53 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model BitcoinTransaction {
+  id          Int      @id @default(autoincrement())
+  hash        String   @unique
+  blockNumber BigInt
+  timestamp   DateTime
+  value       Decimal  @db.Decimal(18, 8)
+  fee         Decimal  @db.Decimal(18, 8)
+  fromAddress String
+  toAddress   String
+  createdAt   DateTime @default(now())
+
+  @@map("bitcoin_transactions")
+  @@index([blockNumber])
+  @@index([timestamp])
+  @@index([fromAddress])
+  @@index([toAddress])
+}
+
+model EthereumTransaction {
+  id          Int      @id @default(autoincrement())
+  hash        String   @unique
+  blockNumber BigInt
+  timestamp   DateTime
+  value       Decimal  @db.Decimal(36, 18)
+  gasFee      Decimal  @db.Decimal(36, 18)
+  gasPrice    Decimal  @db.Decimal(36, 18)
+  gasUsed     BigInt
+  fromAddress String
+  toAddress   String
+  createdAt   DateTime @default(now())
+
+  @@map("ethereum_transactions")
+  @@index([blockNumber])
+  @@index([timestamp])
+  @@index([fromAddress])
+  @@index([toAddress])
+}
