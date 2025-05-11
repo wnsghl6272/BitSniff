@@ -4,14 +4,14 @@ export class TransactionStream {
   private eventSource: EventSource | null = null;
   private callbacks: Map<string, EventCallback[]> = new Map();
 
-  constructor(private baseUrl: string = 'http://localhost:5000') {}
+  constructor(private baseUrl: string = 'http://localhost:5001') {}
 
   connect() {
     if (this.eventSource) {
       this.disconnect();
     }
 
-    this.eventSource = new EventSource(`${this.baseUrl}/api/transactions/stream`);
+    this.eventSource = new EventSource(`${this.baseUrl}/events/transactions`);
 
     this.eventSource.onmessage = (event) => {
       try {
@@ -30,10 +30,20 @@ export class TransactionStream {
   }
 
   private reconnect() {
-    setTimeout(() => {
-      console.log('Attempting to reconnect...');
-      this.connect();
-    }, 5000);
+    let retryCount = 0;
+    const maxRetries = 3;
+    const retryDelay = 5000;
+
+    const connect = () => {
+      if (retryCount < maxRetries) {
+        retryCount++;
+        setTimeout(() => {
+          this.connect();
+        }, retryDelay);
+      }
+    };
+
+    connect();
   }
 
   disconnect() {

@@ -2,26 +2,10 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Paper, Link } from '@mui/material';
 import { formatInTimeZone } from 'date-fns-tz';
+import { TableTransaction } from '../types/business';
+import { TransactionTableProps } from '../types/props';
 
 const TIMEZONE = 'Australia/Sydney';
-
-interface Transaction {
-  hash: string;
-  blockNumber: string;
-  timestamp: string;
-  value: string;
-  fromAddress: string;
-  toAddress: string;
-  network: 'bitcoin' | 'ethereum';
-  fee?: string;
-  gasFee?: string;
-  displayId: string;
-}
-
-interface TransactionTableProps {
-  transactions: Transaction[];
-  onTransactionClick: (transaction: Transaction) => void;
-}
 
 const TransactionTable: React.FC<TransactionTableProps> = ({ transactions, onTransactionClick }) => {
   const navigate = useNavigate();
@@ -31,13 +15,13 @@ const TransactionTable: React.FC<TransactionTableProps> = ({ transactions, onTra
     navigate(`/wallet/${address}`);
   };
 
-  const formatValue = (transaction: Transaction) => {
+  const formatValue = (transaction: TableTransaction) => {
     const value = parseFloat(transaction.value);
     const divisor = transaction.network === 'ethereum' ? 1e18 : 1e8;
     return `${(value / divisor).toFixed(8)} ${transaction.network === 'ethereum' ? 'ETH' : 'BTC'}`;
   };
 
-  const formatFee = (transaction: Transaction) => {
+  const formatFee = (transaction: TableTransaction) => {
     if (transaction.network === 'ethereum' && transaction.gasFee) {
       return `${(parseFloat(transaction.gasFee) / 1e18).toFixed(8)} ETH`;
     }

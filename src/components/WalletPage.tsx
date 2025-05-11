@@ -3,41 +3,10 @@ import { useParams } from 'react-router-dom';
 import { Card, CardContent, Typography, Grid, Box, CircularProgress, Alert } from '@mui/material';
 import { formatDistanceToNow } from 'date-fns';
 import axios from 'axios';
-
-interface WalletData {
-  address: {
-    balance: string;
-    balance_usd?: number;
-    received: string;
-    received_usd?: number;
-    spent: string;
-    spent_usd?: number;
-    first_seen_receiving?: string;
-    last_seen_receiving?: string;
-    first_seen_spending?: string;
-    last_seen_spending?: string;
-  };
-  calls_stats?: {
-    total_calls?: number;
-    total_transactions?: number;
-  };
-  layer_2?: {
-    erc_20?: {
-      [key: string]: {
-        balance: string;
-        token_name: string;
-        token_symbol: string;
-        token_decimals: number;
-      };
-    };
-  };
-}
+import { WalletData } from '../types/business';
+import { WalletPageProps } from '../types/props';
 
 const API_BASE_URL = 'http://localhost:5001';
-
-interface WalletPageProps {
-  address?: string;  // Optional because it can also come from useParams
-}
 
 const WalletPage: React.FC<WalletPageProps> = ({ address: propAddress }) => {
   const { address: paramAddress } = useParams<{ address: string }>();

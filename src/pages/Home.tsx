@@ -3,90 +3,20 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { Search } from "lucide-react"
 import { Input } from "../components/ui/input.js"
 import { Link, useNavigate, useSearchParams } from "react-router-dom"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs.js"
 import { Bitcoin, Wallet } from "lucide-react"
 import { useEffect, useState } from "react"
 import axios from "axios"
-
-interface BlockchairStats {
-  bitcoin: {
-    data: {
-      blocks: number;
-      transactions: number;
-      transactions_24h: number;
-      mempool_transactions: number;
-      difficulty: number;
-      hashrate_24h: string;
-      average_transaction_fee_24h: number | string;
-      median_transaction_fee_24h: number;
-      market_price_usd: number;
-      market_cap_usd: number;
-      volume_24h: number;
-      outputs: number;
-      average_block_size_24h: number;
-      median_time: number;
-      suggested_transaction_fee_per_byte_sat: number;
-      next_block_fee_per_byte_sat: number;
-    };
-  };
-  ethereum: {
-    data: {
-      blocks: number;
-      transactions: number;
-      transactions_24h: number;
-      mempool_transactions: number;
-      difficulty: number;
-      countdowns: Array<{
-        event: string;
-        eth_needed: number;
-        eth_staked: number;
-      }>;
-      average_transaction_fee_24h: string | number;
-      median_transaction_fee_24h: number;
-      market_price_usd: number;
-      market_cap_usd: number;
-      volume_24h: number;
-      calls: number;
-      average_gas_price_24h: number;
-      base_fee_per_gas: number;
-      hashrate_24h: string;
-    };
-  };
-}
-
-interface Transaction {
-  id: number;
-  hash: string;
-  blockNumber: string;
-  timestamp: Date;
-  value: string;
-  fee: string;
-  fromAddress: string;
-  toAddress: string;
-  network: 'bitcoin' | 'ethereum';
-}
-
-interface EthereumTransaction extends Omit<Transaction, 'fee'> {
-  gasFee: string;
-  gasPrice: string;
-  gasUsed: string;
-}
-
-interface TransactionResponse {
-  transactions: (Transaction | EthereumTransaction)[];
-  pagination: {
-    total: number;
-    page: number;
-    limit: number;
-    totalPages: number;
-  };
-}
+import { BlockchairStats, TransactionResponse, EthereumTransaction, BitcoinTransaction } from '../types/business'
+import { Decimal } from '@prisma/client/runtime/library'
 
 // Add helper function for safe number formatting
 const formatNumber = (value: number | string | undefined | null): string => {
   if (value === undefined || value === null) return '0';
   return typeof value === 'string' ? parseFloat(value).toLocaleString() : value.toLocaleString();
 };
+
+// Add CSS class for highlight effect
+const highlightClass = "transition-colors duration-1000 bg-primary/10";
 
 export default function Home() {
   const [stats, setStats] = useState<BlockchairStats | null>(null);
@@ -102,6 +32,11 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState('');
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+
+  // Helper function to check if a field has changed
+  const hasFieldChanged = (network: 'bitcoin' | 'ethereum', field: string) => {
+    return stats?.[network]?.changes?.[field] ?? false;
+  };
 
   useEffect(() => {
     const query = searchParams.get('q');
@@ -174,7 +109,6 @@ export default function Home() {
     const fetchInitialStats = async () => {
       try {
         const response = await axios.get('http://localhost:5001/api/stats/latest');
-        console.log('Initial stats:', response.data);
         setStats(response.data);
         setError(null);
       } catch (err) {
@@ -186,18 +120,22 @@ export default function Home() {
     };
 
     // Set up SSE connection for stats
-    const statsEventSource = new EventSource('http://localhost:5001/api/stats/stream');
+    const statsEventSource = new EventSource('http://localhost:5001/events/stats');
     
     statsEventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        console.log('Received SSE update:', data);
         
         if (data.type === 'stats_update') {
-          console.log('Updating stats with:', data);
           setStats({
-            bitcoin: data.bitcoin,
-            ethereum: data.ethereum
+            bitcoin: {
+              data: data.bitcoin.data,
+              changes: data.bitcoin.changes
+            },
+            ethereum: {
+              data: data.ethereum.data,
+              changes: data.ethereum.changes
+            }
           });
           setLastUpdate(new Date());
           setError(null);
@@ -210,19 +148,22 @@ export default function Home() {
     statsEventSource.onerror = (error) => {
       console.error('Stats SSE connection error:', error);
       setError('Real-time connection lost');
+      statsEventSource.close();
       // Try to reconnect after 5 seconds
       setTimeout(() => {
-        statsEventSource.close();
-        new EventSource('http://localhost:5001/api/stats/stream');
+        const newStatsEventSource = new EventSource('http://localhost:5001/events/stats');
+        newStatsEventSource.onmessage = statsEventSource.onmessage;
+        newStatsEventSource.onerror = statsEventSource.onerror;
       }, 5000);
     };
 
     // Set up SSE for transaction updates
-    const txEventSource = new EventSource('http://localhost:5001/api/transactions/stream');
+    const txEventSource = new EventSource('http://localhost:5001/events/transactions');
     
     txEventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        
         if (data.type === 'transaction_update') {
           // Update transactions immediately when new one arrives
           setTransactions(prevTransactions => {
@@ -249,10 +190,12 @@ export default function Home() {
 
     txEventSource.onerror = (error) => {
       console.error('Transaction SSE connection error:', error);
+      txEventSource.close();
       // Try to reconnect after 5 seconds
       setTimeout(() => {
-        txEventSource.close();
-        new EventSource('http://localhost:5001/api/transactions/stream');
+        const newTxEventSource = new EventSource('http://localhost:5001/events/transactions');
+        newTxEventSource.onmessage = txEventSource.onmessage;
+        newTxEventSource.onerror = txEventSource.onerror;
       }, 5000);
     };
 
@@ -273,8 +216,8 @@ export default function Home() {
     };
   }, []);
 
-  // 시간 포맷팅 함수
-  const formatTime = (timestamp: Date) => {
+  // Time formatting function
+  const formatTime = (timestamp: Date | string) => {
     return new Date(timestamp).toLocaleString('en-AU', {
       timeZone: 'Australia/Sydney',
       day: 'numeric',
@@ -286,12 +229,12 @@ export default function Home() {
     });
   };
 
-  // 주소 축약 함수
+  // Address shortening function
   const shortenAddress = (address: string) => {
     return `${address.slice(0, 6)}...${address.slice(-4)}`;
   };
 
-  const AddressLink = ({ address, network }: { address: string, network: 'bitcoin' | 'ethereum' }) => (
+  const AddressLink = ({ address }: { address: string }) => (
     <Link 
       to={`/wallet/${address}`}
       className="hover:underline text-primary font-mono"
@@ -301,9 +244,17 @@ export default function Home() {
     </Link>
   );
 
-  // 값 포맷팅 함수 (BTC/ETH)
-  const formatValue = (value: string, currency: 'BTC' | 'ETH') => {
-    return `${parseFloat(value).toFixed(6)} ${currency}`;
+  // Value formatting function (BTC/ETH)
+  const formatValue = (value: string | Decimal | undefined | null, currency: 'BTC' | 'ETH') => {
+    if (!value) return `0 ${currency}`;
+    try {
+      const numValue = typeof value === 'string' ? parseFloat(value) : parseFloat(value.toString());
+      if (isNaN(numValue)) return `0 ${currency}`;
+      return `${numValue.toFixed(6)} ${currency}`;
+    } catch (err) {
+      console.error('Error formatting value:', err);
+      return `0 ${currency}`;
+    }
   };
 
   return (
@@ -339,7 +290,7 @@ export default function Home() {
       <section className="py-12 bg-muted/50">
         <div className="container px-4 md:px-6">
           <div className="flex justify-between items-center mb-6">
-            <h2 className="text-2xl font-bold tracking-tight">Network Stats</h2>
+            <h2 data-testid="network-stats" className="text-2xl font-bold tracking-tight">Network Stats</h2>
             <p className="text-sm text-muted-foreground">
               Last updated: {lastUpdate.toLocaleString('en-AU', { 
                 timeZone: 'Australia/Sydney',
@@ -364,48 +315,78 @@ export default function Home() {
                   {/* Row 1 */}
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Market Price (USD)</h4>
-                    <p className="text-2xl font-bold">${formatNumber(stats.bitcoin?.data?.market_price_usd)}</p>
-                    <p className="text-sm text-muted-foreground mt-1">Market Cap: ${formatNumber(stats.bitcoin?.data?.market_cap_usd)}</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('bitcoin', 'market_price_usd') ? highlightClass : ''}`}>
+                      ${formatNumber(stats.bitcoin?.data?.market_price_usd)}
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('bitcoin', 'market_cap_usd') ? highlightClass : ''}`}>
+                      Market Cap: ${formatNumber(stats.bitcoin?.data?.market_cap_usd)}
+                    </p>
                   </div>
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Network Hashrate (24h)</h4>
-                    <p className="text-2xl font-bold">{stats.bitcoin?.data?.hashrate_24h || '0 H/s'}</p>
-                    <p className="text-sm text-muted-foreground mt-1">Difficulty: {formatNumber(stats.bitcoin?.data?.difficulty)}</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('bitcoin', 'hashrate_24h') ? highlightClass : ''}`}>
+                      {stats.bitcoin?.data?.hashrate_24h || '0 H/s'}
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('bitcoin', 'difficulty') ? highlightClass : ''}`}>
+                      Difficulty: {formatNumber(stats.bitcoin?.data?.difficulty)}
+                    </p>
                   </div>
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Mempool Size</h4>
-                    <p className="text-2xl font-bold">{formatNumber(stats.bitcoin?.data?.mempool_transactions)} tx</p>
-                    <p className="text-sm text-muted-foreground mt-1">Blocks: {formatNumber(stats.bitcoin?.data?.blocks)}</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('bitcoin', 'mempool_transactions') ? highlightClass : ''}`}>
+                      {formatNumber(stats.bitcoin?.data?.mempool_transactions)} tx
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('bitcoin', 'blocks') ? highlightClass : ''}`}>
+                      Blocks: {formatNumber(stats.bitcoin?.data?.blocks)}
+                    </p>
                   </div>
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Transactions (24h)</h4>
-                    <p className="text-2xl font-bold">{formatNumber(stats.bitcoin?.data?.transactions_24h)}</p>
-                    <p className="text-sm text-muted-foreground mt-1">Volume: ${formatNumber(stats.bitcoin?.data?.volume_24h)}</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('bitcoin', 'transactions_24h') ? highlightClass : ''}`}>
+                      {formatNumber(stats.bitcoin?.data?.transactions_24h)}
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('bitcoin', 'volume_24h') ? highlightClass : ''}`}>
+                      Volume: ${formatNumber(stats.bitcoin?.data?.volume_24h)}
+                    </p>
                   </div>
                   {/* Row 2 */}
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Average Transaction Fee (24h)</h4>
-                    <p className="text-2xl font-bold">
+                    <p className={`text-2xl font-bold ${hasFieldChanged('bitcoin', 'average_transaction_fee_24h') ? highlightClass : ''}`}>
                       ${typeof stats.bitcoin?.data?.average_transaction_fee_24h === 'string' 
                         ? parseFloat(stats.bitcoin.data.average_transaction_fee_24h || '0').toFixed(2)
                         : (stats.bitcoin?.data?.average_transaction_fee_24h || 0).toFixed(2)}
                     </p>
-                    <p className="text-sm text-muted-foreground mt-1">Median: ${formatNumber(stats.bitcoin?.data?.median_transaction_fee_24h)}</p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('bitcoin', 'median_transaction_fee_24h') ? highlightClass : ''}`}>
+                      Median: ${formatNumber(stats.bitcoin?.data?.median_transaction_fee_24h)}
+                    </p>
                   </div>
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Total Transactions</h4>
-                    <p className="text-2xl font-bold">{formatNumber(stats.bitcoin?.data?.transactions)}</p>
-                    <p className="text-sm text-muted-foreground mt-1">Outputs: {formatNumber(stats.bitcoin?.data?.outputs)}</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('bitcoin', 'transactions') ? highlightClass : ''}`}>
+                      {formatNumber(stats.bitcoin?.data?.transactions)}
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('bitcoin', 'outputs') ? highlightClass : ''}`}>
+                      Outputs: {formatNumber(stats.bitcoin?.data?.outputs)}
+                    </p>
                   </div>
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Average Block Size (24h)</h4>
-                    <p className="text-2xl font-bold">{formatNumber(stats.bitcoin?.data?.average_block_size_24h)} bytes</p>
-                    <p className="text-sm text-muted-foreground mt-1">Median Time: {formatNumber(stats.bitcoin?.data?.median_time)} sec</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('bitcoin', 'average_block_size_24h') ? highlightClass : ''}`}>
+                      {formatNumber(stats.bitcoin?.data?.average_block_size_24h)} bytes
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('bitcoin', 'median_time') ? highlightClass : ''}`}>
+                      Median Time: {formatNumber(stats.bitcoin?.data?.median_time)} sec
+                    </p>
                   </div>
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Suggested Transaction Fee</h4>
-                    <p className="text-2xl font-bold">{formatNumber(stats.bitcoin?.data?.suggested_transaction_fee_per_byte_sat)} sat/byte</p>
-                    <p className="text-sm text-muted-foreground mt-1">Next Block Fee: {formatNumber(stats.bitcoin?.data?.next_block_fee_per_byte_sat)} sat/byte</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('bitcoin', 'suggested_transaction_fee_per_byte_sat') ? highlightClass : ''}`}>
+                      {formatNumber(stats.bitcoin?.data?.suggested_transaction_fee_per_byte_sat)} sat/byte
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('bitcoin', 'next_block_fee_per_byte_sat') ? highlightClass : ''}`}>
+                      Next Block Fee: {formatNumber(stats.bitcoin?.data?.next_block_fee_per_byte_sat)} sat/byte
+                    </p>
                   </div>
                 </div>
               </div>
@@ -420,50 +401,78 @@ export default function Home() {
                   {/* Row 1 */}
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Market Price (USD)</h4>
-                    <p className="text-2xl font-bold">${formatNumber(stats.ethereum?.data?.market_price_usd)}</p>
-                    <p className="text-sm text-muted-foreground mt-1">Market Cap: ${formatNumber(stats.ethereum?.data?.market_cap_usd)}</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('ethereum', 'market_price_usd') ? highlightClass : ''}`}>
+                      ${formatNumber(stats.ethereum?.data?.market_price_usd)}
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('ethereum', 'market_cap_usd') ? highlightClass : ''}`}>
+                      Market Cap: ${formatNumber(stats.ethereum?.data?.market_cap_usd)}
+                    </p>
                   </div>
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Total ETH Staked</h4>
-                    <p className="text-2xl font-bold">{formatNumber(stats.ethereum?.data?.countdowns?.[0]?.eth_staked)} ETH</p>
-                    <p className="text-sm text-muted-foreground mt-1">
+                    <p className={`text-2xl font-bold ${hasFieldChanged('ethereum', 'countdowns') ? highlightClass : ''}`}>
+                      {formatNumber(stats.ethereum?.data?.countdowns?.[0]?.eth_staked)} ETH
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('ethereum', 'market_price_usd') ? highlightClass : ''}`}>
                       Value: ${formatNumber((stats.ethereum?.data?.countdowns?.[0]?.eth_staked || 0) * (stats.ethereum?.data?.market_price_usd || 0))}
                     </p>
                   </div>
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Mempool Size</h4>
-                    <p className="text-2xl font-bold">{formatNumber(stats.ethereum?.data?.mempool_transactions)} tx</p>
-                    <p className="text-sm text-muted-foreground mt-1">Blocks: {formatNumber(stats.ethereum?.data?.blocks)}</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('ethereum', 'mempool_transactions') ? highlightClass : ''}`}>
+                      {formatNumber(stats.ethereum?.data?.mempool_transactions)} tx
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('ethereum', 'blocks') ? highlightClass : ''}`}>
+                      Blocks: {formatNumber(stats.ethereum?.data?.blocks)}
+                    </p>
                   </div>
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Transactions (24h)</h4>
-                    <p className="text-2xl font-bold">{formatNumber(stats.ethereum?.data?.transactions_24h)}</p>
-                    <p className="text-sm text-muted-foreground mt-1">Volume: ${formatNumber(stats.ethereum?.data?.volume_24h)}</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('ethereum', 'transactions_24h') ? highlightClass : ''}`}>
+                      {formatNumber(stats.ethereum?.data?.transactions_24h)}
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('ethereum', 'volume_24h') ? highlightClass : ''}`}>
+                      Volume: ${formatNumber(stats.ethereum?.data?.volume_24h)}
+                    </p>
                   </div>
                   {/* Row 2 */}
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Average Gas Price (24h)</h4>
-                    <p className="text-2xl font-bold">{formatNumber(stats.ethereum?.data?.average_gas_price_24h)} Gwei</p>
-                    <p className="text-sm text-muted-foreground mt-1">Base Fee: {formatNumber(stats.ethereum?.data?.base_fee_per_gas)} Gwei</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('ethereum', 'average_gas_price_24h') ? highlightClass : ''}`}>
+                      {formatNumber(stats.ethereum?.data?.average_gas_price_24h)} Gwei
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('ethereum', 'base_fee_per_gas') ? highlightClass : ''}`}>
+                      Base Fee: {formatNumber(stats.ethereum?.data?.base_fee_per_gas)} Gwei
+                    </p>
                   </div>
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Network Difficulty</h4>
-                    <p className="text-2xl font-bold">{formatNumber(stats.ethereum?.data?.difficulty)}</p>
-                    <p className="text-sm text-muted-foreground mt-1">Hash Rate: {formatNumber(stats.ethereum?.data?.hashrate_24h)}</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('ethereum', 'difficulty') ? highlightClass : ''}`}>
+                      {formatNumber(stats.ethereum?.data?.difficulty)}
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('ethereum', 'hashrate_24h') ? highlightClass : ''}`}>
+                      Hash Rate: {formatNumber(stats.ethereum?.data?.hashrate_24h)}
+                    </p>
                   </div>
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Total Transactions</h4>
-                    <p className="text-2xl font-bold">{formatNumber(stats.ethereum?.data?.transactions)}</p>
-                    <p className="text-sm text-muted-foreground mt-1">Calls: {formatNumber(stats.ethereum?.data?.calls)}</p>
+                    <p className={`text-2xl font-bold ${hasFieldChanged('ethereum', 'transactions') ? highlightClass : ''}`}>
+                      {formatNumber(stats.ethereum?.data?.transactions)}
+                    </p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('ethereum', 'calls') ? highlightClass : ''}`}>
+                      Calls: {formatNumber(stats.ethereum?.data?.calls)}
+                    </p>
                   </div>
                   <div className="rounded-lg border bg-card p-6">
                     <h4 className="text-sm font-medium text-muted-foreground">Average Transaction Fee (24h)</h4>
-                    <p className="text-2xl font-bold">
+                    <p className={`text-2xl font-bold ${hasFieldChanged('ethereum', 'average_transaction_fee_24h') ? highlightClass : ''}`}>
                       ${typeof stats.ethereum?.data?.average_transaction_fee_24h === 'string'
                         ? parseFloat(stats.ethereum.data.average_transaction_fee_24h || '0').toFixed(2)
                         : (stats.ethereum?.data?.average_transaction_fee_24h || 0).toFixed(2)}
                     </p>
-                    <p className="text-sm text-muted-foreground mt-1">Median: ${formatNumber(stats.ethereum?.data?.median_transaction_fee_24h)}</p>
+                    <p className={`text-sm text-muted-foreground mt-1 ${hasFieldChanged('ethereum', 'median_transaction_fee_24h') ? highlightClass : ''}`}>
+                      Median: ${formatNumber(stats.ethereum?.data?.median_transaction_fee_24h)}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -475,7 +484,7 @@ export default function Home() {
       {/* Latest Transactions Section */}
       <section className="py-12">
         <div className="container px-4 md:px-6">
-          <h2 className="text-2xl font-bold tracking-tight mb-6">Latest Transactions</h2>
+          <h2 data-testid="latest-transactions" className="text-2xl font-bold tracking-tight mb-6">Latest Transactions</h2>
           <div className="mb-4">
             <div className="flex items-center space-x-2 mb-4">
               <Button
@@ -573,15 +582,18 @@ export default function Home() {
                       <TableCell>{formatTime(tx.timestamp)}</TableCell>
                       <TableCell>{formatValue(tx.value, tx.network === 'bitcoin' ? 'BTC' : 'ETH')}</TableCell>
                       <TableCell className="font-mono">
-                        <AddressLink address={tx.fromAddress} network={tx.network} />
+                        <AddressLink address={tx.fromAddress} />
                       </TableCell>
                       <TableCell className="font-mono">
-                        <AddressLink address={tx.toAddress} network={tx.network} />
+                        <AddressLink address={tx.toAddress} />
                       </TableCell>
                       <TableCell>
-                        {tx.network === 'bitcoin'
-                          ? formatValue((tx as Transaction).fee, 'BTC')
-                          : formatValue((tx as EthereumTransaction).gasFee, 'ETH')}
+                        {(() => {
+                          const feeValue = tx.network === 'bitcoin'
+                            ? (tx as BitcoinTransaction).fee
+                            : (tx as EthereumTransaction).gasFee;
+                          return formatValue(feeValue, tx.network === 'bitcoin' ? 'BTC' : 'ETH');
+                        })()}
                       </TableCell>
                     </TableRow>
                   ))
