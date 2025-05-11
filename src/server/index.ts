@@ -90,48 +90,6 @@ fetchAndStoreBlockchairStats();
 // Update interval to 60 seconds for stats
 setInterval(fetchAndStoreBlockchairStats, 60 * 1000);
 
-// Function to clean up old transactions
-async function cleanupOldTransactions() {
-  try {
-    // Get the 50th most recent transaction ID for each network
-    const bitcoin50th = await prisma.bitcoinTransaction.findMany({
-      orderBy: { timestamp: 'desc' },
-      take: 50,
-      select: { id: true }
-    });
-
-    const ethereum50th = await prisma.ethereumTransaction.findMany({
-      orderBy: { timestamp: 'desc' },
-      take: 50,
-      select: { id: true }
-    });
-
-    if (bitcoin50th.length === 50) {
-      // Delete all transactions older than the 50th one
-      await prisma.bitcoinTransaction.deleteMany({
-        where: {
-          id: {
-            lt: bitcoin50th[bitcoin50th.length - 1].id
-          }
-        }
-      });
-    }
-
-    if (ethereum50th.length === 50) {
-      // Delete all transactions older than the 50th one
-      await prisma.ethereumTransaction.deleteMany({
-        where: {
-          id: {
-            lt: ethereum50th[ethereum50th.length - 1].id
-          }
-        }
-      });
-    }
-  } catch (error) {
-    console.error('Error cleaning up old transactions:', error);
-  }
-}
-
 // Function to fetch and store transaction data
 async function fetchAndStoreTransactions() {
   try {
@@ -159,8 +117,24 @@ async function fetchAndStoreTransactions() {
 
     // Store Bitcoin transactions
     if (bitcoinResponse.data.data && Array.isArray(bitcoinResponse.data.data)) {
+      console.log(`Processing ${bitcoinResponse.data.data.length} Bitcoin transactions`);
       for (const tx of bitcoinResponse.data.data) {
         try {
+          // Fetch detailed transaction info to get addresses
+          console.log(`Fetching details for tx ${tx.hash}`);
+          const txDetailResponse = await axios.get(`https://api.blockchair.com/bitcoin/dashboards/transaction/${tx.hash}`);
+          const txDetail = txDetailResponse.data.data[tx.hash];
+          
+          if (!txDetail) {
+            console.error(`No detail data found for tx ${tx.hash}`);
+            continue;
+          }
+
+          console.log(`Transaction ${tx.hash} details:`, {
+            fromAddress: txDetail?.inputs?.[0]?.recipient,
+            toAddress: txDetail?.outputs?.[0]?.recipient
+          });
+
           await prisma.bitcoinTransaction.upsert({
             where: { hash: tx.hash },
             update: {
@@ -168,8 +142,8 @@ async function fetchAndStoreTransactions() {
               timestamp: toAustralianTime(tx.time),
               value: tx.output_total.toString(),
               fee: tx.fee.toString(),
-              fromAddress: tx.input_count > 1 ? `${tx.input_count} Inputs` : tx.inputs?.[0]?.recipient || 'Unknown',
-              toAddress: tx.output_count > 1 ? `${tx.output_count} Outputs` : tx.outputs?.[0]?.recipient || 'Unknown'
+              fromAddress: txDetail?.inputs?.[0]?.recipient || 'Unknown',
+              toAddress: txDetail?.outputs?.[0]?.recipient || 'Unknown'
             },
             create: {
               hash: tx.hash,
@@ -177,12 +151,16 @@ async function fetchAndStoreTransactions() {
               timestamp: toAustralianTime(tx.time),
               value: tx.output_total.toString(),
               fee: tx.fee.toString(),
-              fromAddress: tx.input_count > 1 ? `${tx.input_count} Inputs` : tx.inputs?.[0]?.recipient || 'Unknown',
-              toAddress: tx.output_count > 1 ? `${tx.output_count} Outputs` : tx.outputs?.[0]?.recipient || 'Unknown'
+              fromAddress: txDetail?.inputs?.[0]?.recipient || 'Unknown',
+              toAddress: txDetail?.outputs?.[0]?.recipient || 'Unknown'
             }
           });
-        } catch (err) {
-          console.error('Error storing Bitcoin transaction:', err);
+          console.log(`Successfully stored tx ${tx.hash}`);
+        } catch (err: any) {
+          console.error('Error processing Bitcoin transaction:', tx.hash, err);
+          if (err?.response) {
+            console.error('Error response:', err.response?.status, err.response?.data);
+          }
         }
       }
     }
@@ -239,9 +217,6 @@ async function fetchAndStoreTransactions() {
         }
       }
     }
-
-    // Clean up old transactions after storing new ones
-    await cleanupOldTransactions();
 
     // Broadcast update to connected clients
     broadcastUpdate({
@@ -404,6 +379,28 @@ const broadcastUpdate = (data: any) => {
 };
 
 // Define transaction types
+interface BlockchairInput {
+  recipient: string;
+  address: string;
+}
+
+interface BlockchairOutput {
+  recipient: string;
+  address: string;
+}
+
+interface BlockchairTransaction {
+  hash: string;
+  block_id: number;
+  time: string;
+  output_total: number;
+  fee: number;
+  input_count: number;
+  output_count: number;
+  inputs?: BlockchairInput[];
+  outputs?: BlockchairOutput[];
+}
+
 interface BaseTransaction {
   id: number;
   hash: string;
@@ -413,22 +410,19 @@ interface BaseTransaction {
   fromAddress: string;
   toAddress: string;
   createdAt: Date;
-  network: 'bitcoin' | 'ethereum';
 }
 
 interface BitcoinTransaction extends BaseTransaction {
-  network: 'bitcoin';
   fee: Decimal;
 }
 
 interface EthereumTransaction extends BaseTransaction {
-  network: 'ethereum';
   gasFee: Decimal;
   gasPrice: Decimal;
   gasUsed: string;
 }
 
-type Transaction = BitcoinTransaction | EthereumTransaction;
+type Transaction = (BitcoinTransaction & { network: 'bitcoin' }) | (EthereumTransaction & { network: 'ethereum' });
 
 // Update transactions endpoint to support pagination and sorting
 app.get('/api/transactions/latest', async (req: Request, res: Response) => {
@@ -445,24 +439,24 @@ app.get('/api/transactions/latest', async (req: Request, res: Response) => {
     if (network === 'all') {
       // For 'all' network, fetch Bitcoin first then Ethereum
       const bitcoinTx = await prisma.bitcoinTransaction.findMany({
-        orderBy: { timestamp: 'desc' },
+        orderBy: { [sortBy]: sortOrder },
         take: 50
       });
       
       const ethereumTx = await prisma.ethereumTransaction.findMany({
-        orderBy: { timestamp: 'desc' },
+        orderBy: { [sortBy]: sortOrder },
         take: 50
       });
 
       // Add Bitcoin transactions first
-      transactions.push(...bitcoinTx.map(tx => ({
+      transactions.push(...bitcoinTx.map((tx) => ({
         ...tx,
         blockNumber: tx.blockNumber.toString(),
         network: 'bitcoin' as const
       })));
 
       // Then add Ethereum transactions
-      transactions.push(...ethereumTx.map(tx => ({
+      transactions.push(...ethereumTx.map((tx) => ({
         ...tx,
         blockNumber: tx.blockNumber.toString(),
         gasUsed: tx.gasUsed.toString(),
@@ -470,22 +464,22 @@ app.get('/api/transactions/latest', async (req: Request, res: Response) => {
       })));
     } else if (network === 'bitcoin') {
       const bitcoinTx = await prisma.bitcoinTransaction.findMany({
-        orderBy: { timestamp: 'desc' },
+        orderBy: { [sortBy]: sortOrder },
         take: 50
       });
       
-      transactions.push(...bitcoinTx.map(tx => ({
+      transactions.push(...bitcoinTx.map((tx) => ({
         ...tx,
         blockNumber: tx.blockNumber.toString(),
         network: 'bitcoin' as const
       })));
     } else if (network === 'ethereum') {
       const ethereumTx = await prisma.ethereumTransaction.findMany({
-        orderBy: { timestamp: 'desc' },
+        orderBy: { [sortBy]: sortOrder },
         take: 50
       });
 
-      transactions.push(...ethereumTx.map(tx => ({
+      transactions.push(...ethereumTx.map((tx) => ({
         ...tx,
         blockNumber: tx.blockNumber.toString(),
         gasUsed: tx.gasUsed.toString(),
