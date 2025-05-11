@@ -29,16 +29,16 @@ const clients = {
 
 // Helper function to convert UTC to Australian time
 function toAustralianTime(date: string | Date): Date {
-  return new Date(formatInTimeZone(new Date(date), TIMEZONE, 'yyyy-MM-dd HH:mm:ss'));
+  const inputDate = new Date(date);
+  // Convert to Australian timezone
+  const auDate = formatInTimeZone(inputDate, TIMEZONE, "yyyy-MM-dd'T'HH:mm:ss.SSSXXX");
+  return new Date(auDate);
 }
 
 // Helper function to format time to Australian timezone string
-function formatAustralianTime(date: Date): string {
-  return formatInTimeZone(
-    date,
-    TIMEZONE,
-    "d MMM yyyy, h:mm a"  // Format: "11 May 2024, 4:55 PM"
-  );
+function formatAustralianTime(date: Date | string): string {
+  const inputDate = new Date(date);
+  return formatInTimeZone(inputDate, TIMEZONE, "d MMM yyyy, h:mm a");
 }
 
 // Helper function for delay
@@ -129,8 +129,9 @@ setInterval(fetchAndStoreBlockchairStats, 60 * 1000);
 
 // Constants for transaction fetching
 const FETCH_INTERVAL = 60 * 1000; // 1 minute
-const TRANSACTION_BATCH_SIZE = 10; // 한 번에 처리할 트랜잭션 수
-const MAX_STORED_TRANSACTIONS = 20; // 각 네트워크당 최대 표시할 트랜잭션 수
+const TRANSACTION_BATCH_SIZE = 5; // 한 번에 처리할 트랜잭션 수 줄임
+const MAX_STORED_TRANSACTIONS = 50; // 각 네트워크당 최대 표시할 트랜잭션 수
+const API_DELAY = 5000; // API 호출 간 딜레이 5초
 
 // Add tracking for last processed block
 let lastProcessedBitcoinBlock: number | null = null;
@@ -140,75 +141,131 @@ const API_CONFIG = {
   headers: {
     'Accept': 'application/json'
   },
-  validateStatus: isSuccessStatus,
+  validateStatus: (status: number) => status === 200 || status === 402, // 402 에러도 허용
   timeout: 30000
 };
+
+// Function to cleanup old transactions
+async function cleanupOldTransactions() {
+  try {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - 7); // 7일 이상 된 트랜잭션 삭제
+
+    const deletedBitcoin = await prisma.bitcoinTransaction.deleteMany({
+      where: {
+        timestamp: {
+          lt: cutoffDate
+        }
+      }
+    });
+
+    const deletedEthereum = await prisma.ethereumTransaction.deleteMany({
+      where: {
+        timestamp: {
+          lt: cutoffDate
+        }
+      }
+    });
+
+    console.log(`Cleaned up ${deletedBitcoin.count} Bitcoin and ${deletedEthereum.count} Ethereum transactions older than 7 days`);
+  } catch (error) {
+    console.error('Error cleaning up old transactions:', error);
+  }
+}
 
 // Function to fetch and process Bitcoin block transactions
 async function fetchBitcoinBlockTransactions(blockHeight: number) {
   try {
-    console.log(`Fetching Bitcoin block ${blockHeight} details...`);
+    console.log(`Fetching Bitcoin transactions for block ${blockHeight}...`);
     
-    // Get block details
-    const blockResponse = await axiosWithRetry(
-      `https://api.blockchair.com/bitcoin/dashboards/block/${blockHeight}`,
-      API_CONFIG
+    // 블록의 트랜잭션들을 한 번에 가져오기
+    const response = await axiosWithRetry(
+      'https://api.blockchair.com/bitcoin/transactions',
+      {
+        ...API_CONFIG,
+        params: {
+          q: `block_id(${blockHeight})`,
+          limit: TRANSACTION_BATCH_SIZE,
+          s: 'time(desc)'
+        }
+      },
+      3,
+      10000
     );
 
-    if (!blockResponse.data?.data?.[blockHeight]) {
-      console.log(`No data found for block ${blockHeight}`);
+    console.log('Bitcoin API Transaction Data:', {
+      sampleTx: response.data?.data?.[0],
+      rawTime: response.data?.data?.[0]?.time,
+      currentServerTime: new Date().toISOString()
+    });
+
+    // API 제한에 걸린 경우
+    if (response.status === 402) {
+      console.log(`API limit reached for Bitcoin block ${blockHeight}, will retry later`);
       return;
     }
 
-    const blockData = blockResponse.data.data[blockHeight];
-    const transactions = blockData.transactions;
+    if (!response.data?.data || !Array.isArray(response.data.data)) {
+      console.log(`No transactions found for block ${blockHeight}`);
+      return;
+    }
 
-    console.log(`Found ${transactions.length} transactions in block ${blockHeight}`);
+    const transactions = response.data.data;
 
-    // Process each transaction in the block
-    for (const txHash of transactions.slice(0, TRANSACTION_BATCH_SIZE)) {
+    // Process each transaction
+    for (const tx of transactions) {
       try {
-        // Check if transaction already exists
-        const existingTx = await prisma.bitcoinTransaction.findUnique({
-          where: { hash: txHash }
+        // 개선된 중복 체크 - 블록 번호도 함께 확인
+        const existingTx = await prisma.bitcoinTransaction.findFirst({
+          where: {
+            AND: [
+              { hash: tx.hash },
+              { blockNumber: BigInt(blockHeight) }
+            ]
+          }
         });
 
         if (existingTx) {
-          console.log(`Transaction ${txHash} already exists, skipping...`);
+          console.log(`Transaction ${tx.hash} in block ${blockHeight} already exists, skipping...`);
           continue;
         }
 
-        // Fetch detailed transaction information
-        const txResponse = await axiosWithRetry(
-          `https://api.blockchair.com/bitcoin/dashboards/transaction/${txHash}`,
-          API_CONFIG
+        // 트랜잭션 상세 정보 가져오기
+        const txDetailResponse = await axiosWithRetry(
+          `https://api.blockchair.com/bitcoin/dashboards/transaction/${tx.hash}`,
+          API_CONFIG,
+          3,
+          10000
         );
 
-        const txData = txResponse.data.data[txHash];
-        if (!txData) {
-          console.log(`No data found for transaction ${txHash}`);
+        // API 제한에 걸린 경우
+        if (txDetailResponse.status === 402) {
+          console.log(`API limit reached for transaction details ${tx.hash}, will retry later`);
           continue;
         }
 
-        const timestamp = toAustralianTime(blockData.time);
+        const txDetail = txDetailResponse.data?.data?.[tx.hash];
+        if (!txDetail) {
+          console.log(`No detail data found for transaction ${tx.hash}`);
+          continue;
+        }
+
+        const timestamp = toAustralianTime(tx.time);
         
         const transaction = {
-          hash: txHash,
+          hash: tx.hash,
           blockNumber: BigInt(blockHeight),
           timestamp: timestamp,
-          value: txData.transaction.output_total.toString(),
-          fee: txData.transaction.fee.toString(),
-          fromAddress: txData.inputs?.[0]?.recipient || txData.inputs?.[0]?.address || 'Unknown',
-          toAddress: txData.outputs?.[0]?.recipient || txData.outputs?.[0]?.address || 'Unknown'
+          value: tx.output_total.toString(),
+          fee: tx.fee.toString(),
+          fromAddress: txDetail.inputs?.[0]?.recipient || txDetail.inputs?.[0]?.address || 'Unknown',
+          toAddress: txDetail.outputs?.[0]?.recipient || txDetail.outputs?.[0]?.address || 'Unknown'
         };
 
         const savedTx = await prisma.bitcoinTransaction.create({
           data: transaction
         });
 
-        console.log(`Saved new Bitcoin transaction: ${txHash} from block ${blockHeight}`);
-
-        // Broadcast the new transaction
         const broadcastData = {
           type: 'transaction_update',
           network: 'bitcoin',
@@ -217,18 +274,18 @@ async function fetchBitcoinBlockTransactions(blockHeight: number) {
             id: savedTx.id,
             blockNumber: transaction.blockNumber.toString(),
             displayId: savedTx.id,
-            timestamp: formatAustralianTime(transaction.timestamp)
+            timestamp: formatAustralianTime(timestamp)
           }
         };
 
         broadcastUpdate(broadcastData);
-        await delay(1000); // Reduced delay since we're processing fewer transactions
+        await delay(API_DELAY);
       } catch (err) {
-        console.error(`Error processing transaction ${txHash} from block ${blockHeight}:`, err);
+        console.error(`Error processing Bitcoin transaction ${tx.hash}:`, err);
       }
     }
-  } catch (err) {
-    console.error(`Error processing block ${blockHeight}:`, err);
+  } catch (error) {
+    console.error(`Error processing Bitcoin block ${blockHeight}:`, error);
   }
 }
 
@@ -265,13 +322,21 @@ async function fetchAndStoreTransactions() {
             lastProcessedBitcoinBlock = latestTx ? Number(latestTx.blockNumber) : latestBlockHeight - 1;
           }
 
-          // Process new blocks
-          const nextBlockHeight = lastProcessedBitcoinBlock + 1;
-          if (nextBlockHeight <= latestBlockHeight) {
-            await fetchBitcoinBlockTransactions(nextBlockHeight);
-            lastProcessedBitcoinBlock = nextBlockHeight;
-            console.log(`Updated last processed Bitcoin block to ${lastProcessedBitcoinBlock}`);
-          } else {
+          // 개선된 블록 처리 로직 - 한 번에 여러 블록 처리
+          const currentBlock: number = lastProcessedBitcoinBlock || latestBlockHeight - 1;
+          const blocksToProcess = Math.min(5, latestBlockHeight - currentBlock);
+          console.log(`Processing ${blocksToProcess} Bitcoin blocks...`);
+          
+          for (let i = 0; i < blocksToProcess; i++) {
+            const nextBlockHeight: number = currentBlock + i + 1;
+            if (nextBlockHeight <= latestBlockHeight) {
+              await fetchBitcoinBlockTransactions(nextBlockHeight);
+              lastProcessedBitcoinBlock = nextBlockHeight;
+              console.log(`Updated last processed Bitcoin block to ${lastProcessedBitcoinBlock}`);
+            }
+          }
+
+          if (blocksToProcess === 0) {
             console.log('No new Bitcoin blocks to process');
           }
         } catch (error) {
@@ -292,20 +357,26 @@ async function fetchAndStoreTransactions() {
                 limit: TRANSACTION_BATCH_SIZE,
                 s: 'time(desc)'  // 시간 기준 내림차순
               }
-            }
+            },
+            3,    // 3번 재시도
+            10000 // 10초 간격으로 재시도
           );
 
-          console.log('Ethereum API Response:', {
-            status: ethereumResponse.status,
-            dataLength: ethereumResponse.data.data?.length || 0,
-            firstTx: ethereumResponse.data.data?.[0]?.hash
+          console.log('Ethereum API Transaction Data:', {
+            sampleTx: ethereumResponse.data.data[0],
+            rawTime: ethereumResponse.data.data[0]?.time,
+            currentServerTime: new Date().toISOString()
           });
+
+          // API 제한에 걸린 경우
+          if (ethereumResponse.status === 402) {
+            console.log('API limit reached for Ethereum transactions, will retry later');
+            return;
+          }
 
           if (ethereumResponse.data.data && Array.isArray(ethereumResponse.data.data)) {
             for (const tx of ethereumResponse.data.data) {
               try {
-                const txTime = toAustralianTime(tx.time);
-
                 // Check for duplicate before processing
                 const existingTx = await prisma.ethereumTransaction.findUnique({
                   where: { hash: tx.hash }
@@ -321,12 +392,12 @@ async function fetchAndStoreTransactions() {
                   continue;
                 }
 
-                console.log(`Processing new Ethereum transaction: ${tx.hash}, time: ${formatAustralianTime(txTime)}`);
+                const timestamp = toAustralianTime(tx.time);
 
                 const txData = {
                   hash: tx.hash,
                   blockNumber: BigInt(tx.block_id),
-                  timestamp: txTime,
+                  timestamp: timestamp,
                   value: tx.value.toString(),
                   gasFee: new Decimal(tx.gas_used).mul(tx.gas_price).toString(),
                   gasPrice: tx.gas_price.toString(),
@@ -347,14 +418,12 @@ async function fetchAndStoreTransactions() {
                     id: savedTx.id,
                     blockNumber: txData.blockNumber.toString(),
                     displayId: savedTx.id,
-                    timestamp: formatAustralianTime(txData.timestamp)
+                    timestamp: formatAustralianTime(timestamp)
                   }
                 };
 
-                console.log('Broadcasting Ethereum transaction update:', broadcastData);
                 broadcastUpdate(broadcastData);
-
-                await delay(2000);
+                await delay(API_DELAY);
               } catch (err) {
                 console.error(`Error processing Ethereum transaction: ${tx.hash}`, err);
               }
@@ -365,6 +434,9 @@ async function fetchAndStoreTransactions() {
         }
       })()
     ]);
+
+    // 오래된 트랜잭션 정리
+    await cleanupOldTransactions();
 
   } catch (error) {
     console.error('Error in fetchAndStoreTransactions:', error);
@@ -482,6 +554,10 @@ const broadcastUpdate = (data: any) => {
   // 트랜잭션 업데이트인 경우 최신 ID 포함
   if (data.type === 'transaction_update') {
     data.transaction.displayId = data.transaction.id;
+    // Add isNew flag to indicate this is a new transaction
+    data.transaction.isNew = true;
+    // Add server timestamp for proper ordering
+    data.transaction.serverTimestamp = new Date().toISOString();
   }
 
   clientSet.forEach(client => {
@@ -533,11 +609,13 @@ interface BaseTransaction {
   id: number;
   hash: string;
   blockNumber: string;
-  timestamp: Date;
+  timestamp: Date | string;
   value: Decimal;
   fromAddress: string;
   toAddress: string;
   createdAt: Date;
+  serverTimestamp?: string;
+  isNew?: boolean;
 }
 
 interface BitcoinTransaction extends BaseTransaction {
@@ -578,41 +656,57 @@ app.get('/api/transactions/latest', async (req: Request, res: Response) => {
       transactions.push(...bitcoinTx.map((tx) => ({
         ...tx,
         blockNumber: tx.blockNumber.toString(),
-        network: 'bitcoin' as const
+        timestamp: tx.timestamp,
+        displayTimestamp: formatAustralianTime(tx.timestamp),
+        network: 'bitcoin' as const,
+        serverTimestamp: tx.createdAt.toISOString()
       })));
 
       // Then add Ethereum transactions
       transactions.push(...ethereumTx.map((tx) => ({
         ...tx,
         blockNumber: tx.blockNumber.toString(),
+        timestamp: tx.timestamp,
+        displayTimestamp: formatAustralianTime(tx.timestamp),
         gasUsed: tx.gasUsed.toString(),
-        network: 'ethereum' as const
+        network: 'ethereum' as const,
+        serverTimestamp: tx.createdAt.toISOString()
       })));
 
-      // Sort combined transactions by ID in descending order
-      transactions.sort((a, b) => b.id - a.id);
+      // Sort combined transactions by server timestamp in descending order
+      transactions.sort((a, b) => {
+        const timeA = a.serverTimestamp || a.createdAt.toISOString();
+        const timeB = b.serverTimestamp || b.createdAt.toISOString();
+        return new Date(timeB).getTime() - new Date(timeA).getTime();
+      });
     } else if (network === 'bitcoin') {
       const bitcoinTx = await prisma.bitcoinTransaction.findMany({
-        orderBy: { id: 'desc' },
+        orderBy: { timestamp: 'desc' },
         take: MAX_STORED_TRANSACTIONS
       });
       
       transactions.push(...bitcoinTx.map((tx) => ({
         ...tx,
         blockNumber: tx.blockNumber.toString(),
-        network: 'bitcoin' as const
+        timestamp: tx.timestamp,
+        displayTimestamp: formatAustralianTime(tx.timestamp),
+        network: 'bitcoin' as const,
+        serverTimestamp: tx.createdAt.toISOString()
       })));
     } else if (network === 'ethereum') {
       const ethereumTx = await prisma.ethereumTransaction.findMany({
-        orderBy: { id: 'desc' },
+        orderBy: { timestamp: 'desc' },
         take: MAX_STORED_TRANSACTIONS
       });
 
       transactions.push(...ethereumTx.map((tx) => ({
         ...tx,
         blockNumber: tx.blockNumber.toString(),
+        timestamp: tx.timestamp,
+        displayTimestamp: formatAustralianTime(tx.timestamp),
         gasUsed: tx.gasUsed.toString(),
-        network: 'ethereum' as const
+        network: 'ethereum' as const,
+        serverTimestamp: tx.createdAt.toISOString()
       })));
     }
 

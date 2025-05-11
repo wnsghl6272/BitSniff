@@ -52,7 +52,7 @@ model EthereumTransaction {
   @@index([toAddress])
 }
 
-model blockchairStats {
+model BlockchairStats {
   id        Int      @id @default(autoincrement())
   timestamp String
   network   String
@@ -69,6 +69,7 @@ model Wallet {
   address   String
   network   String
   data      Json
+  createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@id([address, network])
