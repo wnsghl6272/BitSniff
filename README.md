@@ -120,7 +120,7 @@ To stay within Blockchair's free-tier API limits (1 request per minute and 100-r
 ## Testing
 
 ### Unit Tests
-We use Vitest for unit testing. Here's an example of a test for the Loader component:
+Used Vitest for unit testing. Here's an example of a test for the Loader component:
 
 ```tsx
 // src/components/ui/loader.test.tsx
@@ -149,7 +149,7 @@ describe('Loader', () => {
 ```
 
 ### E2E Tests
-We use Playwright for end-to-end testing. Here's an example of a test for the Home page:
+Used Playwright for end-to-end testing. Here's an example of a test for the Home page:
 
 ```ts
 // tests/e2e/home.spec.ts
