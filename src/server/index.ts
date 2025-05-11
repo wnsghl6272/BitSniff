@@ -90,6 +90,48 @@ fetchAndStoreBlockchairStats();
 // Update interval to 60 seconds for stats
 setInterval(fetchAndStoreBlockchairStats, 60 * 1000);
 
+// Function to clean up old transactions
+async function cleanupOldTransactions() {
+  try {
+    // Get the 50th most recent transaction ID for each network
+    const bitcoin50th = await prisma.bitcoinTransaction.findMany({
+      orderBy: { timestamp: 'desc' },
+      take: 50,
+      select: { id: true }
+    });
+
+    const ethereum50th = await prisma.ethereumTransaction.findMany({
+      orderBy: { timestamp: 'desc' },
+      take: 50,
+      select: { id: true }
+    });
+
+    if (bitcoin50th.length === 50) {
+      // Delete all transactions older than the 50th one
+      await prisma.bitcoinTransaction.deleteMany({
+        where: {
+          id: {
+            lt: bitcoin50th[bitcoin50th.length - 1].id
+          }
+        }
+      });
+    }
+
+    if (ethereum50th.length === 50) {
+      // Delete all transactions older than the 50th one
+      await prisma.ethereumTransaction.deleteMany({
+        where: {
+          id: {
+            lt: ethereum50th[ethereum50th.length - 1].id
+          }
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error cleaning up old transactions:', error);
+  }
+}
+
 // Function to fetch and store transaction data
 async function fetchAndStoreTransactions() {
   try {
@@ -145,7 +187,7 @@ async function fetchAndStoreTransactions() {
       }
     }
 
-    // Fetch Ethereum transactions with the same query
+    // Fetch Ethereum transactions
     const ethereumResponse = await axios.get('https://api.blockchair.com/ethereum/transactions', {
       params: {
         q: query,
@@ -158,16 +200,11 @@ async function fetchAndStoreTransactions() {
     if (ethereumResponse.data.data && Array.isArray(ethereumResponse.data.data)) {
       for (const tx of ethereumResponse.data.data) {
         try {
-          // Skip synthetic transactions and transactions without hash
           if (!tx.hash || tx.type === 'synthetic_coinbase') {
-            console.log(`Skipping Ethereum transaction: ${tx.type || 'missing hash'}`);
             continue;
           }
 
-          // Convert Wei to Ether (divide by 1e18) for value
           const valueInEther = (BigInt(tx.value || 0) / BigInt(1e18)).toString();
-          
-          // Calculate gas fee in Ether
           const gasUsed = BigInt(tx.gas_used || 0);
           const gasPrice = BigInt(tx.gas_price || 0);
           const gasFeeInWei = gasUsed * gasPrice;
@@ -203,11 +240,12 @@ async function fetchAndStoreTransactions() {
       }
     }
 
+    // Clean up old transactions after storing new ones
+    await cleanupOldTransactions();
+
     // Broadcast update to connected clients
     broadcastUpdate({
       type: 'transactions_update',
-      bitcoin: bitcoinResponse.data.data || [],
-      ethereum: ethereumResponse.data.data || [],
       timestamp: formatAustralianTime(new Date())
     });
 
@@ -216,7 +254,39 @@ async function fetchAndStoreTransactions() {
   }
 }
 
-// Initial fetch
+// Function to initialize latest transactions on server start
+async function initializeLatestTransactions() {
+  try {
+    console.log('Initializing latest transactions from database...');
+    
+    // Get latest 50 Bitcoin transactions
+    const bitcoinTx = await prisma.bitcoinTransaction.findMany({
+      orderBy: { timestamp: 'desc' },
+      take: 50
+    });
+    
+    // Get latest 50 Ethereum transactions
+    const ethereumTx = await prisma.ethereumTransaction.findMany({
+      orderBy: { timestamp: 'desc' },
+      take: 50
+    });
+
+    // Broadcast initial transactions to connected clients
+    broadcastUpdate({
+      type: 'transactions_update',
+      timestamp: formatAustralianTime(new Date())
+    });
+
+    console.log(`Initialized with ${bitcoinTx.length} Bitcoin and ${ethereumTx.length} Ethereum transactions`);
+  } catch (error) {
+    console.error('Error initializing latest transactions:', error);
+  }
+}
+
+// Initialize when server starts
+initializeLatestTransactions();
+
+// Initial fetch from Blockchair API
 fetchAndStoreTransactions();
 
 // Fetch transactions every minute
@@ -369,21 +439,39 @@ app.get('/api/transactions/latest', async (req: Request, res: Response) => {
     const sortOrder = (req.query.sortOrder as string) === 'asc' ? 'asc' : 'desc';
     const network = (req.query.network as string) || 'all';
 
-    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
     let transactions: Transaction[] = [];
 
     // Fetch transactions based on network
-    if (network === 'all' || network === 'bitcoin') {
+    if (network === 'all') {
+      // For 'all' network, fetch Bitcoin first then Ethereum
       const bitcoinTx = await prisma.bitcoinTransaction.findMany({
-        where: {
-          timestamp: {
-            gte: tenMinutesAgo
-          }
-        },
-        orderBy: {
-          [sortBy]: sortOrder
-        },
-        take: network === 'all' ? 50 : 100  // Limit to 50 for combined view
+        orderBy: { timestamp: 'desc' },
+        take: 50
+      });
+      
+      const ethereumTx = await prisma.ethereumTransaction.findMany({
+        orderBy: { timestamp: 'desc' },
+        take: 50
+      });
+
+      // Add Bitcoin transactions first
+      transactions.push(...bitcoinTx.map(tx => ({
+        ...tx,
+        blockNumber: tx.blockNumber.toString(),
+        network: 'bitcoin' as const
+      })));
+
+      // Then add Ethereum transactions
+      transactions.push(...ethereumTx.map(tx => ({
+        ...tx,
+        blockNumber: tx.blockNumber.toString(),
+        gasUsed: tx.gasUsed.toString(),
+        network: 'ethereum' as const
+      })));
+    } else if (network === 'bitcoin') {
+      const bitcoinTx = await prisma.bitcoinTransaction.findMany({
+        orderBy: { timestamp: 'desc' },
+        take: 50
       });
       
       transactions.push(...bitcoinTx.map(tx => ({
@@ -391,19 +479,10 @@ app.get('/api/transactions/latest', async (req: Request, res: Response) => {
         blockNumber: tx.blockNumber.toString(),
         network: 'bitcoin' as const
       })));
-    }
-
-    if (network === 'all' || network === 'ethereum') {
+    } else if (network === 'ethereum') {
       const ethereumTx = await prisma.ethereumTransaction.findMany({
-        where: {
-          timestamp: {
-            gte: tenMinutesAgo
-          }
-        },
-        orderBy: {
-          [sortBy]: sortOrder
-        },
-        take: network === 'all' ? 50 : 100  // Limit to 50 for combined view
+        orderBy: { timestamp: 'desc' },
+        take: 50
       });
 
       transactions.push(...ethereumTx.map(tx => ({
@@ -414,22 +493,8 @@ app.get('/api/transactions/latest', async (req: Request, res: Response) => {
       })));
     }
 
-    // Sort combined transactions if needed
-    if (network === 'all') {
-      transactions.sort((a, b) => {
-        if (sortBy === 'timestamp') {
-          return sortOrder === 'desc' 
-            ? b.timestamp.getTime() - a.timestamp.getTime()
-            : a.timestamp.getTime() - b.timestamp.getTime();
-        }
-        return sortOrder === 'desc'
-          ? String(b[sortBy as keyof Transaction]).localeCompare(String(a[sortBy as keyof Transaction]))
-          : String(a[sortBy as keyof Transaction]).localeCompare(String(b[sortBy as keyof Transaction]));
-      });
-    }
-
-    // Calculate total and apply pagination
-    const total = network === 'all' ? Math.min(transactions.length, 100) : Math.min(transactions.length, 100);
+    // Calculate pagination
+    const total = transactions.length;
     const startIndex = (page - 1) * limit;
     const endIndex = Math.min(startIndex + limit, total);
     const paginatedTransactions = transactions.slice(startIndex, endIndex);
