@@ -6,6 +6,7 @@ import Home from './pages/Home.tsx';
 import TransactionDetail from './pages/TransactionDetail.tsx';
 import WalletPage from './components/WalletPage.tsx';
 import SearchRedirect from './pages/SearchRedirect.tsx';
+import BlockNumber from './pages/BlockNumber.tsx';
 
 export const router = createBrowserRouter([
   {
@@ -28,6 +29,10 @@ export const router = createBrowserRouter([
       {
         path: 'wallet/:address',
         element: <WalletPage />,
+      },
+      {
+        path: 'block/:blockNumber',
+        element: <BlockNumber />,
       },
     ],
   }

@@ -830,6 +830,118 @@ app.get('/api/transaction/:hash', async (req: Request, res: Response) => {
   }
 });
 
+// Utility function to convert BigInt values to strings
+function serializeBigInt(obj: any): any {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+  
+  if (typeof obj === 'bigint') {
+    return obj.toString();
+  }
+  
+  if (Array.isArray(obj)) {
+    return obj.map(serializeBigInt);
+  }
+  
+  if (typeof obj === 'object') {
+    return Object.fromEntries(
+      Object.entries(obj).map(([key, value]) => [key, serializeBigInt(value)])
+    );
+  }
+  
+  return obj;
+}
+
+// Get transactions by block number
+app.get('/api/block/:blockNumber', async (req: Request, res: Response) => {
+  try {
+    console.log('Received request for block:', req.params.blockNumber);
+    const blockNumber = BigInt(req.params.blockNumber);
+    console.log('Converted block number to BigInt:', blockNumber.toString());
+    
+    // Fetch both Bitcoin and Ethereum transactions for the block number
+    const [bitcoinTxs, ethereumTxs] = await Promise.all([
+      prisma.bitcoinTransaction.findMany({
+        where: {
+          blockNumber
+        }
+      }),
+      prisma.ethereumTransaction.findMany({
+        where: {
+          blockNumber
+        }
+      })
+    ]);
+
+    console.log('Found Bitcoin transactions:', bitcoinTxs.length);
+    console.log('Found Ethereum transactions:', ethereumTxs.length);
+
+    // Transform and combine the transactions
+    const transactions = [
+      ...bitcoinTxs.map(tx => ({
+        ...serializeBigInt(tx),
+        network: 'bitcoin' as const
+      })),
+      ...ethereumTxs.map(tx => ({
+        ...serializeBigInt(tx),
+        network: 'ethereum' as const
+      }))
+    ];
+
+    // Sort transactions by timestamp
+    transactions.sort((a, b) => 
+      new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    );
+
+    console.log('Total transactions found:', transactions.length);
+    res.json({ transactions });
+  } catch (error) {
+    console.error('Detailed error in /api/block/:blockNumber:', error);
+    if (error instanceof Error) {
+      console.error('Error name:', error.name);
+      console.error('Error message:', error.message);
+      console.error('Error stack:', error.stack);
+    }
+    res.status(500).json({ 
+      error: 'Failed to fetch block transactions',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Get latest block numbers
+app.get('/api/latest-blocks', async (req: Request, res: Response) => {
+  try {
+    const [latestBitcoinBlock, latestEthereumBlock] = await Promise.all([
+      prisma.bitcoinTransaction.findFirst({
+        orderBy: {
+          blockNumber: 'desc'
+        },
+        select: {
+          blockNumber: true
+        }
+      }),
+      prisma.ethereumTransaction.findFirst({
+        orderBy: {
+          blockNumber: 'desc'
+        },
+        select: {
+          blockNumber: true
+        }
+      })
+    ]);
+
+    res.json({
+      bitcoin: latestBitcoinBlock?.blockNumber.toString(),
+      ethereum: latestEthereumBlock?.blockNumber.toString()
+    });
+  } catch (error) {
+    console.error('Error fetching latest blocks:', error);
+    res.status(500).json({ error: 'Failed to fetch latest blocks' });
+  }
+});
+
 const PORT = process.env.PORT || 5001;
 
 app.listen(PORT, () => {

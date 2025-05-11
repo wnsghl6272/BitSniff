@@ -112,31 +112,14 @@ export default function Home() {
   }, [searchParams]);
 
   const handleSearch = (query: string) => {
-    // Ethereum transaction hash pattern (0x followed by 64 hexadecimal characters)
-    const txPattern = /^0x[a-fA-F0-9]{64}$/;
-    
-    // Ethereum address pattern (0x followed by 40 hexadecimal characters)
-    const addressPattern = /^0x[a-fA-F0-9]{40}$/;
-    
-    // Bitcoin transaction hash pattern (64 hexadecimal characters)
-    const btcTxPattern = /^[a-fA-F0-9]{64}$/;
-    
-    // Bitcoin address patterns (different formats)
-    const btcAddressPattern = /^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$|^bc1[ac-hj-np-z02-9]{11,71}$/;
-
-    if (txPattern.test(query) || btcTxPattern.test(query)) {
-      navigate(`/tx/${query}`);
-    } else if (addressPattern.test(query) || btcAddressPattern.test(query)) {
-      navigate(`/wallet/${query}`);
-    }
+    // Update URL with search query
+    navigate(`/search?q=${encodeURIComponent(query.trim())}`);
   };
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchQuery.trim()) return;
-    
-    // Update URL with search query
-    navigate(`/search?q=${encodeURIComponent(searchQuery.trim())}`);
+    handleSearch(searchQuery);
   };
 
   // Function to fetch transactions with filters
