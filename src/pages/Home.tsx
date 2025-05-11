@@ -2,7 +2,7 @@ import { Button } from "../components/ui/button.js"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table.js"
 import { Search } from "lucide-react"
 import { Input } from "../components/ui/input.js"
-import { Link } from "react-router-dom"
+import { Link, useNavigate, useSearchParams } from "react-router-dom"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs.js"
 import { Bitcoin, Wallet } from "lucide-react"
 import { useEffect, useState } from "react"
@@ -99,6 +99,45 @@ export default function Home() {
   const [sortBy, setSortBy] = useState('timestamp');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [network, setNetwork] = useState<'all' | 'bitcoin' | 'ethereum'>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  useEffect(() => {
+    const query = searchParams.get('q');
+    if (query) {
+      setSearchQuery(query);
+      handleSearch(query);
+    }
+  }, [searchParams]);
+
+  const handleSearch = (query: string) => {
+    // Ethereum transaction hash pattern (0x followed by 64 hexadecimal characters)
+    const txPattern = /^0x[a-fA-F0-9]{64}$/;
+    
+    // Ethereum address pattern (0x followed by 40 hexadecimal characters)
+    const addressPattern = /^0x[a-fA-F0-9]{40}$/;
+    
+    // Bitcoin transaction hash pattern (64 hexadecimal characters)
+    const btcTxPattern = /^[a-fA-F0-9]{64}$/;
+    
+    // Bitcoin address patterns (different formats)
+    const btcAddressPattern = /^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$|^bc1[ac-hj-np-z02-9]{11,71}$/;
+
+    if (txPattern.test(query) || btcTxPattern.test(query)) {
+      navigate(`/tx/${query}`);
+    } else if (addressPattern.test(query) || btcAddressPattern.test(query)) {
+      navigate(`/wallet/${query}`);
+    }
+  };
+
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!searchQuery.trim()) return;
+    
+    // Update URL with search query
+    navigate(`/search?q=${encodeURIComponent(searchQuery.trim())}`);
+  };
 
   // Function to fetch transactions with filters
   const fetchTransactions = async (
@@ -188,6 +227,11 @@ export default function Home() {
     statsEventSource.onerror = (error) => {
       console.error('Stats SSE connection error:', error);
       setError('Real-time connection lost');
+      // Try to reconnect after 5 seconds
+      setTimeout(() => {
+        statsEventSource.close();
+        new EventSource('http://localhost:5001/api/stats/stream');
+      }, 5000);
     };
 
     // Set up SSE for transaction updates
@@ -196,8 +240,23 @@ export default function Home() {
     txEventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'transactions_update') {
-          // Refresh current page when new transactions arrive
+        if (data.type === 'transaction_update') {
+          // Update transactions immediately when new one arrives
+          setTransactions(prevTransactions => {
+            if (!prevTransactions) return prevTransactions;
+            
+            const newTransaction = data.transaction;
+            const updatedTransactions = [newTransaction, ...prevTransactions.transactions.slice(0, -1)];
+            
+            return {
+              ...prevTransactions,
+              transactions: updatedTransactions
+            };
+          });
+          
+          setLastUpdate(new Date());
+        } else if (data.type === 'transactions_update') {
+          // Refresh the whole list when bulk update received
           fetchTransactions(currentPage, sortBy, sortOrder, network);
         }
       } catch (err) {
@@ -205,23 +264,42 @@ export default function Home() {
       }
     };
 
+    txEventSource.onerror = (error) => {
+      console.error('Transaction SSE connection error:', error);
+      // Try to reconnect after 5 seconds
+      setTimeout(() => {
+        txEventSource.close();
+        new EventSource('http://localhost:5001/api/transactions/stream');
+      }, 5000);
+    };
+
     // Initial fetch
     fetchInitialStats();
     fetchTransactions(1);
+
+    // Set up auto-refresh interval (backup for SSE)
+    const refreshInterval = setInterval(() => {
+      fetchTransactions(currentPage, sortBy, sortOrder, network);
+    }, 60000); // Refresh every minute as backup
 
     // Cleanup
     return () => {
       statsEventSource.close();
       txEventSource.close();
+      clearInterval(refreshInterval);
     };
-  }, []); // Remove dependencies from here
+  }, []);
 
   // 시간 포맷팅 함수
   const formatTime = (timestamp: Date) => {
     return new Date(timestamp).toLocaleString('en-AU', {
       timeZone: 'Australia/Sydney',
-      dateStyle: 'medium',
-      timeStyle: 'short'
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: 'numeric',
+      hour12: true
     });
   };
 
@@ -257,17 +335,19 @@ export default function Home() {
             <p className="mx-auto max-w-[700px] text-muted-foreground md:text-xl">
               Real-time tracking for BTC & ETH transactions. Search by address, transaction hash, or block number.
             </p>
-            <div className="w-full max-w-2xl flex items-center space-x-2">
+            <form onSubmit={handleSearchSubmit} className="w-full max-w-2xl flex items-center space-x-2">
               <div className="relative flex-1">
                 <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
                 <Input
                   className="pl-8"
                   placeholder="Search by address, transaction hash, or block number..."
                   type="search"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
                 />
               </div>
-              <Button>Search</Button>
-            </div>
+              <Button type="submit">Search</Button>
+            </form>
           </div>
         </div>
       </section>

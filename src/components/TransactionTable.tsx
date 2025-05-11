@@ -1,7 +1,9 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Paper, Link } from '@mui/material';
-import { formatDistanceToNow } from 'date-fns';
+import { formatInTimeZone } from 'date-fns-tz';
+
+const TIMEZONE = 'Australia/Sydney';
 
 interface Transaction {
   hash: string;
@@ -13,6 +15,7 @@ interface Transaction {
   network: 'bitcoin' | 'ethereum';
   fee?: string;
   gasFee?: string;
+  displayId: string;
 }
 
 interface TransactionTableProps {
@@ -44,11 +47,20 @@ const TransactionTable: React.FC<TransactionTableProps> = ({ transactions, onTra
     return 'N/A';
   };
 
+  const formatTime = (timestamp: string) => {
+    return formatInTimeZone(
+      new Date(timestamp),
+      TIMEZONE,
+      "d MMM yyyy, h:mm a"  // Format: "11 May 2024, 4:55 PM"
+    );
+  };
+
   return (
     <TableContainer component={Paper}>
       <Table>
         <TableHead>
           <TableRow>
+            <TableCell>ID</TableCell>
             <TableCell>Hash</TableCell>
             <TableCell>Time</TableCell>
             <TableCell>From</TableCell>
@@ -65,6 +77,7 @@ const TransactionTable: React.FC<TransactionTableProps> = ({ transactions, onTra
               onClick={() => onTransactionClick(tx)}
               sx={{ cursor: 'pointer' }}
             >
+              <TableCell>{tx.displayId}</TableCell>
               <TableCell>
                 <Link 
                   component="button"
@@ -78,7 +91,7 @@ const TransactionTable: React.FC<TransactionTableProps> = ({ transactions, onTra
                 </Link>
               </TableCell>
               <TableCell>
-                {formatDistanceToNow(new Date(tx.timestamp), { addSuffix: true })}
+                {formatTime(tx.timestamp)}
               </TableCell>
               <TableCell>
                 <Link
