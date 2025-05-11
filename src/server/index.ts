@@ -5,27 +5,21 @@ import axios from 'axios';
 import { PrismaClient } from '@prisma/client';
 import { formatInTimeZone } from 'date-fns-tz';
 import { Decimal } from '@prisma/client/runtime/library';
+import { prisma } from '../lib/prisma.js';
+
+// Import separated modules
+import { corsConfig } from './config/cors.js';
+import { clients, broadcastUpdate } from './utils/clientManager.js';
+import { fetchAndStoreBlockchairStats } from './utils/statsProcessor.js';
+import { formatAustralianTime } from './utils/timeUtils.js';
 
 const TIMEZONE = 'Australia/Sydney';
 const app = express();
 const router = Router();
-const prisma = new PrismaClient();
 
 // CORS configuration
-app.use(cors({
-  origin: true,
-  credentials: true,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
+app.use(corsConfig);
 app.use(express.json());
-
-// Store connected clients for different event types
-const clients = {
-  transactions: new Set<Response>(),
-  stats: new Set<Response>()
-};
 
 // Helper function to convert UTC to Australian time
 function toAustralianTime(date: string | Date): Date {
@@ -35,16 +29,10 @@ function toAustralianTime(date: string | Date): Date {
   return new Date(auDate);
 }
 
-// Helper function to format time to Australian timezone string
-function formatAustralianTime(date: Date | string): string {
-  const inputDate = new Date(date);
-  return formatInTimeZone(inputDate, TIMEZONE, "d MMM yyyy, h:mm a");
-}
-
 // Helper function for delay
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Axios 에러 타입 정의
+// Axios error type declaration
 interface AxiosError {
   code?: string;
   response?: {
@@ -54,20 +42,18 @@ interface AxiosError {
   message: string;
 }
 
-// 재시도 로직을 위한 유틸리티 함수 수정
+// Utility function for retry logic
 const axiosWithRetry = async (url: string, config: any, retries = 3, delay = 2000) => {
   try {
     return await axios.get(url, {
       ...config,
-      timeout: 30000, // 30초로 타임아웃 증가
+      timeout: 30000,
     });
   } catch (error: unknown) {
     if (retries === 0) throw error;
     
     const axiosError = error as AxiosError;
     if (axiosError.code === 'ECONNABORTED' || axiosError.response?.status === 402) {
-      console.log(`Request failed, retrying... (${retries} attempts left)`);
-      console.log(`Error: ${axiosError.message}`);
       await new Promise(resolve => setTimeout(resolve, delay));
       return axiosWithRetry(url, config, retries - 1, delay);
     }
@@ -76,109 +62,56 @@ const axiosWithRetry = async (url: string, config: any, retries = 3, delay = 200
   }
 };
 
-// validateStatus 타입 정의
+// validateStatus type definition
 const isSuccessStatus = (status: number): boolean => status === 200;
 
-// Function to fetch and store Blockchair stats
-async function fetchAndStoreBlockchairStats() {
-  try {
-    // Fetch Bitcoin stats
-    const bitcoinResponse = await axios.get('https://api.blockchair.com/bitcoin/stats');
-    const bitcoinStats = bitcoinResponse.data;
-    
-    await prisma.blockchairStats.create({
-      data: {
-        timestamp: formatAustralianTime(new Date()),
-        network: 'bitcoin',
-        data: bitcoinStats
-      }
-    });
-
-    // Fetch Ethereum stats
-    const ethereumResponse = await axios.get('https://api.blockchair.com/ethereum/stats');
-    const ethereumStats = ethereumResponse.data;
-    
-    await prisma.blockchairStats.create({
-      data: {
-        timestamp: formatAustralianTime(new Date()),
-        network: 'ethereum',
-        data: ethereumStats
-      }
-    });
-
-    // Broadcast update to connected clients with the correct data structure
-    const updateData = {
-      type: 'stats_update',
-      bitcoin: { data: bitcoinStats.data },
-      ethereum: { data: ethereumStats.data },
-      timestamp: formatAustralianTime(new Date())
-    };
-
-    console.log('Broadcasting stats update:', JSON.stringify(updateData, null, 2));
-    broadcastUpdate(updateData);
-
-  } catch (error) {
-    console.error('Error fetching Blockchair stats:', error);
-  }
+interface BlockchairStatsData {
+  [key: string]: any;
 }
 
-fetchAndStoreBlockchairStats();
+interface BlockchairApiResponse {
+  data: BlockchairStatsData;
+}
 
-// Update interval to 60 seconds for stats
-setInterval(fetchAndStoreBlockchairStats, 60 * 1000);
+// Helper function to compare stats and identify changes
+function compareStats(oldData: any, newData: any): Record<string, boolean> {
+  const changes: Record<string, boolean> = {};
+  
+  if (!oldData || !newData) {
+    return changes;
+  }
+
+  // Compare each field
+  for (const key in newData) {
+    if (JSON.stringify(oldData[key]) !== JSON.stringify(newData[key])) {
+      changes[key] = true;
+    }
+  }
+
+  return changes;
+}
 
 // Constants for transaction fetching
 const FETCH_INTERVAL = 60 * 1000; // 1 minute
-const TRANSACTION_BATCH_SIZE = 5; // 한 번에 처리할 트랜잭션 수 줄임
-const MAX_STORED_TRANSACTIONS = 50; // 각 네트워크당 최대 표시할 트랜잭션 수
-const API_DELAY = 5000; // API 호출 간 딜레이 5초
+const TRANSACTION_BATCH_SIZE = 5; // Number of transactions to process at once
+const MAX_STORED_TRANSACTIONS = 50; // Maximum number of transactions to display per network
+const API_DELAY = 5000; // Delay between API calls (5 seconds)
 
 // Add tracking for last processed block
 let lastProcessedBitcoinBlock: number | null = null;
 
-// API 호출 설정
+// API call settings
 const API_CONFIG = {
   headers: {
     'Accept': 'application/json'
   },
-  validateStatus: (status: number) => status === 200 || status === 402, // 402 에러도 허용
+  validateStatus: (status: number) => status === 200 || status === 402, // Allow 402 error
   timeout: 30000
 };
-
-// Function to cleanup old transactions
-async function cleanupOldTransactions() {
-  try {
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - 7); // 7일 이상 된 트랜잭션 삭제
-
-    const deletedBitcoin = await prisma.bitcoinTransaction.deleteMany({
-      where: {
-        timestamp: {
-          lt: cutoffDate
-        }
-      }
-    });
-
-    const deletedEthereum = await prisma.ethereumTransaction.deleteMany({
-      where: {
-        timestamp: {
-          lt: cutoffDate
-        }
-      }
-    });
-
-    console.log(`Cleaned up ${deletedBitcoin.count} Bitcoin and ${deletedEthereum.count} Ethereum transactions older than 7 days`);
-  } catch (error) {
-    console.error('Error cleaning up old transactions:', error);
-  }
-}
 
 // Function to fetch and process Bitcoin block transactions
 async function fetchBitcoinBlockTransactions(blockHeight: number) {
   try {
-    console.log(`Fetching Bitcoin transactions for block ${blockHeight}...`);
-    
-    // 블록의 트랜잭션들을 한 번에 가져오기
     const response = await axiosWithRetry(
       'https://api.blockchair.com/bitcoin/transactions',
       {
@@ -193,29 +126,18 @@ async function fetchBitcoinBlockTransactions(blockHeight: number) {
       10000
     );
 
-    console.log('Bitcoin API Transaction Data:', {
-      sampleTx: response.data?.data?.[0],
-      rawTime: response.data?.data?.[0]?.time,
-      currentServerTime: new Date().toISOString()
-    });
-
-    // API 제한에 걸린 경우
     if (response.status === 402) {
-      console.log(`API limit reached for Bitcoin block ${blockHeight}, will retry later`);
       return;
     }
 
     if (!response.data?.data || !Array.isArray(response.data.data)) {
-      console.log(`No transactions found for block ${blockHeight}`);
       return;
     }
 
     const transactions = response.data.data;
 
-    // Process each transaction
     for (const tx of transactions) {
       try {
-        // 개선된 중복 체크 - 블록 번호도 함께 확인
         const existingTx = await prisma.bitcoinTransaction.findFirst({
           where: {
             AND: [
@@ -226,11 +148,9 @@ async function fetchBitcoinBlockTransactions(blockHeight: number) {
         });
 
         if (existingTx) {
-          console.log(`Transaction ${tx.hash} in block ${blockHeight} already exists, skipping...`);
           continue;
         }
 
-        // 트랜잭션 상세 정보 가져오기
         const txDetailResponse = await axiosWithRetry(
           `https://api.blockchair.com/bitcoin/dashboards/transaction/${tx.hash}`,
           API_CONFIG,
@@ -238,15 +158,12 @@ async function fetchBitcoinBlockTransactions(blockHeight: number) {
           10000
         );
 
-        // API 제한에 걸린 경우
         if (txDetailResponse.status === 402) {
-          console.log(`API limit reached for transaction details ${tx.hash}, will retry later`);
           continue;
         }
 
         const txDetail = txDetailResponse.data?.data?.[tx.hash];
         if (!txDetail) {
-          console.log(`No detail data found for transaction ${tx.hash}`);
           continue;
         }
 
@@ -294,7 +211,7 @@ async function fetchAndStoreTransactions() {
   try {
     console.log('Starting transaction fetch at:', new Date().toISOString());
 
-    // 비트코인과 이더리움 트랜잭션을 병렬로 처리
+    // Process Bitcoin and Ethereum transactions in parallel
     await Promise.all([
       // Bitcoin transactions
       (async () => {
@@ -322,7 +239,7 @@ async function fetchAndStoreTransactions() {
             lastProcessedBitcoinBlock = latestTx ? Number(latestTx.blockNumber) : latestBlockHeight - 1;
           }
 
-          // 개선된 블록 처리 로직 - 한 번에 여러 블록 처리
+          // Improved block processing logic - process multiple blocks at once
           const currentBlock: number = lastProcessedBitcoinBlock || latestBlockHeight - 1;
           const blocksToProcess = Math.min(5, latestBlockHeight - currentBlock);
           console.log(`Processing ${blocksToProcess} Bitcoin blocks...`);
@@ -355,20 +272,14 @@ async function fetchAndStoreTransactions() {
               ...API_CONFIG,
               params: {
                 limit: TRANSACTION_BATCH_SIZE,
-                s: 'time(desc)'  // 시간 기준 내림차순
+                s: 'time(desc)'  // Sort by time in descending order
               }
             },
-            3,    // 3번 재시도
-            10000 // 10초 간격으로 재시도
+            3,    // Retry 3 times
+            10000 // Retry every 10 seconds
           );
 
-          console.log('Ethereum API Transaction Data:', {
-            sampleTx: ethereumResponse.data.data[0],
-            rawTime: ethereumResponse.data.data[0]?.time,
-            currentServerTime: new Date().toISOString()
-          });
-
-          // API 제한에 걸린 경우
+          // If API limit is reached
           if (ethereumResponse.status === 402) {
             console.log('API limit reached for Ethereum transactions, will retry later');
             return;
@@ -398,10 +309,12 @@ async function fetchAndStoreTransactions() {
                   hash: tx.hash,
                   blockNumber: BigInt(tx.block_id),
                   timestamp: timestamp,
-                  value: tx.value.toString(),
-                  gasFee: new Decimal(tx.gas_used).mul(tx.gas_price).toString(),
-                  gasPrice: tx.gas_price.toString(),
-                  gasUsed: tx.gas_used.toString(),
+                  value: tx.value?.toString() || '0',
+                  gasFee: tx.gas_used && tx.gas_price 
+                    ? new Decimal(tx.gas_used).mul(tx.gas_price).toString()
+                    : '0',
+                  gasPrice: tx.gas_price?.toString() || '0',
+                  gasUsed: tx.gas_used?.toString() || '0',
                   fromAddress: tx.sender || 'Unknown',
                   toAddress: tx.recipient || 'Unknown'
                 };
@@ -434,9 +347,6 @@ async function fetchAndStoreTransactions() {
         }
       })()
     ]);
-
-    // 오래된 트랜잭션 정리
-    await cleanupOldTransactions();
 
   } catch (error) {
     console.error('Error in fetchAndStoreTransactions:', error);
@@ -506,7 +416,7 @@ app.get('/api/stats/latest', async (req: Request, res: Response) => {
 });
 
 // SSE endpoint for real-time stats updates
-app.get('/api/stats/stream', (req: Request, res: Response) => {
+app.get('/events/stats', (req: Request, res: Response) => {
   // Set headers for SSE
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -527,7 +437,7 @@ app.get('/api/stats/stream', (req: Request, res: Response) => {
 });
 
 // SSE endpoint for real-time transaction updates
-app.get('/api/transactions/stream', (req: Request, res: Response) => {
+app.get('/events/transactions', (req: Request, res: Response) => {
   // Set headers for SSE
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -546,29 +456,6 @@ app.get('/api/transactions/stream', (req: Request, res: Response) => {
     clients.transactions.delete(res);
   });
 });
-
-// Update broadcastUpdate function to handle different event types
-const broadcastUpdate = (data: any) => {
-  const clientSet = data.type === 'stats_update' ? clients.stats : clients.transactions;
-  
-  // 트랜잭션 업데이트인 경우 최신 ID 포함
-  if (data.type === 'transaction_update') {
-    data.transaction.displayId = data.transaction.id;
-    // Add isNew flag to indicate this is a new transaction
-    data.transaction.isNew = true;
-    // Add server timestamp for proper ordering
-    data.transaction.serverTimestamp = new Date().toISOString();
-  }
-
-  clientSet.forEach(client => {
-    try {
-      client.write(`data: ${JSON.stringify(data)}\n\n`);
-    } catch (error) {
-      console.error('Error sending SSE update:', error);
-      clientSet.delete(client);
-    }
-  });
-};
 
 // Define transaction types
 interface BlockchairInput {
@@ -968,9 +855,6 @@ app.get('/api/block/:blockNumber', async (req: Request, res: Response) => {
       })
     ]);
 
-    console.log('Found Bitcoin transactions:', bitcoinTxs.length);
-    console.log('Found Ethereum transactions:', ethereumTxs.length);
-
     // Transform and combine the transactions
     const transactions = [
       ...bitcoinTxs.map(tx => ({
@@ -1036,10 +920,12 @@ app.get('/api/latest-blocks', async (req: Request, res: Response) => {
   }
 });
 
+// Initialize stats fetching
+fetchAndStoreBlockchairStats();
+setInterval(fetchAndStoreBlockchairStats, 60 * 1000);
+
 const PORT = process.env.PORT || 5001;
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
-});
-
-export { broadcastUpdate }; 
+}); 

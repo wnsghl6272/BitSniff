@@ -2,39 +2,17 @@ import { useParams, Link } from "react-router-dom"
 import { ArrowRight, Clock, Database, HardDrive, Loader2, Bitcoin, Wallet } from "lucide-react"
 import { useEffect, useState } from "react"
 import { formatInTimeZone } from 'date-fns-tz'
+import { TransactionDetailProps } from '../types/props'
+import { TransactionDetails } from '../types/business'
+import { Decimal } from '@prisma/client/runtime/library'
 
 const TIMEZONE = 'Australia/Sydney';
 const API_BASE_URL = 'http://localhost:5001';
 
-interface Transaction {
-  id: number;
-  hash: string;
-  blockNumber: string;
-  timestamp: string;
-  value: string;
-  network: 'bitcoin' | 'ethereum';
-  status: string;
-  fromAddress: string;
-  toAddress: string;
-  fee?: string;
-  gasFee?: string;
-  gasPrice?: string;
-  gasUsed?: string;
-  inputs?: any[];
-  outputs?: any[];
-  input?: string;
-  confirmations: number;
-  rawData: any;
-}
-
-interface TransactionDetailProps {
-  hash?: string;  // Optional because it can also come from useParams
-}
-
 export default function TransactionDetail({ hash: propHash }: TransactionDetailProps) {
   const { hash: paramHash } = useParams();
   const hash = propHash || paramHash;
-  const [transaction, setTransaction] = useState<Transaction | null>(null);
+  const [transaction, setTransaction] = useState<TransactionDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,8 +35,9 @@ export default function TransactionDetail({ hash: propHash }: TransactionDetailP
     fetchTransaction();
   }, [hash]);
 
-  const formatValue = (value: string, network: 'bitcoin' | 'ethereum') => {
-    const numValue = parseFloat(value);
+  const formatValue = (value: string | Decimal | undefined, network: 'bitcoin' | 'ethereum') => {
+    if (!value) return `0 ${network === 'ethereum' ? 'ETH' : 'BTC'}`;
+    const numValue = typeof value === 'string' ? parseFloat(value) : parseFloat(value.toString());
     const divisor = network === 'ethereum' ? 1e18 : 1e8;
     return `${(numValue / divisor).toFixed(8)} ${network === 'ethereum' ? 'ETH' : 'BTC'}`;
   };

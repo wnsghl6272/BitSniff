@@ -9,29 +9,8 @@ import { Badge } from "@/components/ui/badge";
 import { formatDistance } from "date-fns";
 import { Link } from "react-router-dom";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-
-interface Transaction {
-  hash: string;
-  network: 'bitcoin' | 'ethereum';
-  timestamp: string;
-  from: string;
-  to: string;
-  value: bigint;
-  fee: bigint;
-  status: 'confirmed' | 'pending';
-  blockNumber?: number;
-  gasPrice?: bigint;
-  gasLimit?: bigint;
-  nonce?: number;
-  input?: string;
-  rawData?: any; // Full JSON data from the API
-}
-
-interface TransactionModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  transaction: Transaction;
-}
+import { ModalTransaction } from '../types/business';
+import { TransactionModalProps } from '../types/props';
 
 export function TransactionModal({ isOpen, onClose, transaction }: TransactionModalProps) {
   return (
@@ -67,19 +46,19 @@ export function TransactionModal({ isOpen, onClose, transaction }: TransactionMo
               <div>
                 <h3 className="text-sm font-medium text-muted-foreground">From</h3>
                 <Link 
-                  to={`/wallet/${transaction.from}`}
+                  to={`/wallet/${transaction.fromAddress}`}
                   className="text-sm font-mono break-all text-primary hover:underline"
                 >
-                  {transaction.from}
+                  {transaction.fromAddress}
                 </Link>
               </div>
               <div>
                 <h3 className="text-sm font-medium text-muted-foreground">To</h3>
                 <Link
-                  to={`/wallet/${transaction.to}`}
+                  to={`/wallet/${transaction.toAddress}`}
                   className="text-sm font-mono break-all text-primary hover:underline"
                 >
-                  {transaction.to}
+                  {transaction.toAddress}
                 </Link>
               </div>
               <div>
@@ -94,8 +73,8 @@ export function TransactionModal({ isOpen, onClose, transaction }: TransactionMo
                 <h3 className="text-sm font-medium text-muted-foreground">Fee</h3>
                 <p className="text-sm">
                   {transaction.network === 'ethereum'
-                    ? `${formatEther(transaction.fee)} ETH`
-                    : `${Number(transaction.fee) / 1e8} BTC`}
+                    ? `${formatEther(transaction.gasFee || '0')} ETH`
+                    : `${Number(transaction.fee || '0') / 1e8} BTC`}
                 </p>
               </div>
               {transaction.blockNumber && (
