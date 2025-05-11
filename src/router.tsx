@@ -5,6 +5,7 @@ import ErrorPage from './pages/ErrorPage.tsx';
 import Home from './pages/Home.tsx';
 import TransactionDetail from './pages/TransactionDetail.tsx';
 import WalletPage from './components/WalletPage.tsx';
+import SearchRedirect from './pages/SearchRedirect.tsx';
 
 export const router = createBrowserRouter([
   {
@@ -15,6 +16,10 @@ export const router = createBrowserRouter([
       {
         index: true,
         element: <Home />,
+      },
+      {
+        path: 'search',
+        element: <SearchRedirect />,
       },
       {
         path: 'tx/:hash',

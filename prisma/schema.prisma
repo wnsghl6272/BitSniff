@@ -37,9 +37,9 @@ model EthereumTransaction {
   hash        String   @unique
   blockNumber BigInt
   timestamp   DateTime
-  value       Decimal  @db.Decimal(36, 18)
-  gasFee      Decimal  @db.Decimal(36, 18)
-  gasPrice    Decimal  @db.Decimal(36, 18)
+  value       Decimal  @db.Decimal(78, 18)
+  gasFee      Decimal  @db.Decimal(78, 18)
+  gasPrice    Decimal  @db.Decimal(78, 18)
   gasUsed     BigInt
   fromAddress String
   toAddress   String

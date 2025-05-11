@@ -35,8 +35,13 @@ interface WalletData {
 
 const API_BASE_URL = 'http://localhost:5001';
 
-const WalletPage: React.FC = () => {
-  const { address } = useParams<{ address: string }>();
+interface WalletPageProps {
+  address?: string;  // Optional because it can also come from useParams
+}
+
+const WalletPage: React.FC<WalletPageProps> = ({ address: propAddress }) => {
+  const { address: paramAddress } = useParams<{ address: string }>();
+  const address = propAddress || paramAddress;
   const [walletData, setWalletData] = useState<WalletData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
